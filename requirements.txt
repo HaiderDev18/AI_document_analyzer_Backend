@@ -13,6 +13,8 @@ drf-yasg==1.21.10
 # Document Processing
 # PyPDF2==3.0.1
 # python-docx==1.1.0
+uvicorn
+django-silk
 openai
 pinecone==6.0.1
 tiktoken==0.5.2

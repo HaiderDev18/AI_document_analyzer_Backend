@@ -30,4 +30,4 @@ echo "Deployment preparation complete!"
 echo "Starting server with gunicorn..."
 
 # Start the server
-exec gunicorn AI_doc_process.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 120 
+exec uvicorn AI_doc_process.asgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 120
