@@ -1,0 +1,22 @@
+{
+    "builds": [
+      {
+        "src": "AI_Doc_Process_Backend/wsgi.py",
+        "use": "@vercel/python",
+        "config": {
+          "maxLambdaSize": "15mb",
+          "runtime": "python3.9" 
+        }
+      }
+    ],
+    "routes": [
+      {
+        "src": "/api/run-migrations",
+        "dest": "AI_Doc_Process_Backend/run_migrations.py"
+      },
+      {
+        "src": "/(.*)",
+        "dest": "AI_Doc_Process_Backend/wsgi.py"
+      }
+    ]
+  }

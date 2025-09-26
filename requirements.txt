@@ -1,0 +1,26 @@
+Django==5.2.1
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.5.0
+django-cors-headers==4.3.1
+python-decouple==3.8
+# Pillow==10.4.0
+psycopg2-binary==2.9.9
+dj-database-url==2.1.0
+whitenoise==6.6.0
+gunicorn==21.2.0
+ipython==8.18.1
+drf-yasg==1.21.10
+# Document Processing
+# PyPDF2==3.0.1
+# python-docx==1.1.0
+openai
+pinecone==6.0.1
+tiktoken==0.5.2
+langchain
+python-dotenv==1.1.0
+
+# Additional packages for production
+django-extensions==3.2.3
+
+llama-cloud-services
+llama-parse
