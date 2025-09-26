@@ -1,33 +1,48 @@
-from django.db import models
-from django.conf import settings
-from django.utils import timezone
-from django.contrib.auth import get_user_model
 import uuid
+from django.db import models
+from django.db.models import Q
+from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 User = get_user_model()
 
 
+class DocumentQuerySet(models.QuerySet):
+    def alive(self):
+        return self.filter(deleted_at__isnull=True)
+
+
+class AliveManager(models.Manager):
+    def get_queryset(self):
+        return DocumentQuerySet(self.model, using=self._db).alive()
+
+
 class Document(models.Model):
-    """
-    Model to store uploaded documents
-    """
+    """Metadata for an uploaded document (hot path)."""
+
+    STATUS_PENDING = "pending"
+    STATUS_PROCESSING = "processing"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
 
     STATUS_CHOICES = [
-        ("pending", "Pending"),
-        ("processing", "Processing"),
-        ("completed", "Completed"),
-        ("failed", "Failed"),
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
     ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=255)
-    raw_text = models.TextField(blank=True)
-    summary = models.TextField(blank=True)
-    # file
+
+    # File metadata (actual bytes are in FileAsset)
     file_name = models.CharField(max_length=255)
-    file_path = models.CharField(max_length=500, null=True, blank=True)
-    file_type = models.CharField(max_length=10, null=True, blank=True)
-    file_size = models.PositiveIntegerField()  # in bytes
-    # relations
+    file_ext = models.CharField(max_length=16, blank=True)
+    file_mime = models.CharField(max_length=128, blank=True)
+    file_size = models.PositiveIntegerField()  # bytes
+    checksum = models.CharField(max_length=64, db_index=True, blank=True)  # sha256
+
+    # Relations
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="documents")
     session = models.ForeignKey(
         "chat.ChatSession",
@@ -37,29 +52,65 @@ class Document(models.Model):
         blank=True,
     )
 
-    # Processing status
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
-    is_processed = models.BooleanField(default=False)
+    # Processing
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+    processing_error = models.TextField(blank=True)
 
-    # Extracted content
+    # Lightweight, value-added outputs (keep small; no raw_text stored)
+    summary = models.TextField(blank=True)
     risk_factors = models.JSONField(default=dict, blank=True)
 
-    # Timestamps
+    # Timestamps & soft delete
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    deleted_at = models.DateTimeField(null=True, blank=True)  # For soft delete
+    deleted_at = models.DateTimeField(null=True, blank=True)
 
-    def __str__(self):
-        return f"{self.title} - Session: {self.session.title if self.session else 'No Session'}"
-
-    def soft_delete(self):
-        """Soft delete the document"""
-        self.deleted_at = timezone.now()
-        self.save()
-
-    def is_deleted(self):
-        """Check if document is soft deleted"""
-        return self.deleted_at is not None
+    objects = AliveManager()  # default excludes soft-deleted
+    all_objects = models.Manager()  # includes soft-deleted
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            # one live document per (user, session, file_name)
+            models.UniqueConstraint(
+                fields=["user", "session", "file_name"],
+                condition=Q(deleted_at__isnull=True),
+                name="uniq_live_doc_per_session_name",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["user", "session", "created_at"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        sess = getattr(self.session, "title", None) or "No Session"
+        return f"{self.title} — Session: {sess}"
+
+    def soft_delete(self):
+        self.deleted_at = timezone.now()
+        self.save(update_fields=["deleted_at", "updated_at"])
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
+
+
+class FileAsset(models.Model):
+    """Raw/original bytes stored in DB (archival + reprocessing)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.OneToOneField(
+        Document, on_delete=models.CASCADE, related_name="asset"
+    )
+    blob = models.BinaryField()  # original file bytes
+    size = models.PositiveIntegerField()
+    mime_type = models.CharField(max_length=128, blank=True)
+    checksum = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["checksum"])]

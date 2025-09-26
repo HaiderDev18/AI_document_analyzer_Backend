@@ -1,146 +1,105 @@
 from rest_framework import serializers
 from .models import Document
-from .services.document_processor import DocumentProcessor
 import os
-from AI_doc_process import settings
-import uuid
-from django.core.files.storage import default_storage
-from chat.models import ChatSession
-from rest_framework.response import Response
-from rest_framework import serializers
-from .models import Document
-import os
-import uuid
-from django.core.files.storage import default_storage
-from django.conf import settings
 
 
-class DocumentUploadSerializer(serializers.ModelSerializer):
-    file = serializers.FileField(write_only=True)
+import hashlib
+from .models import FileAsset
 
-    class Meta:
-        model = Document
-        fields = ["file"]
 
-    def validate_file(self, file):
-        """
-        Validate the uploaded file's extension.
-        """
-        allowed_extensions = [".pdf", ".doc", ".docx"]
-        ext = os.path.splitext(file.name)[1].lower()
-        if ext not in allowed_extensions:
-            raise serializers.ValidationError(
-                f"Allowed file types: {', '.join(allowed_extensions)}"
-            )
+class DocumentUploadSerializer(serializers.Serializer):
+    # Accept explicit title or fall back to file name
+    title = serializers.CharField(required=False, allow_blank=True)
+    file = serializers.FileField()
 
-        # Additional validation through DocumentProcessor can be added if necessary
-        is_valid, error_message = DocumentProcessor().validate_file(
-            file, ext.lstrip(".")
-        )
-        if not is_valid:
-            raise serializers.ValidationError(error_message)
-        return file
+    def validate(self, attrs):
+        f = attrs["file"]
+        max_bytes = 50 * 1024 * 1024  # 50MB; adjust as needed
+        if f.size <= 0:
+            raise serializers.ValidationError("Empty file.")
+        if f.size > max_bytes:
+            raise serializers.ValidationError("File too large.")
+        return attrs
 
     def create(self, validated_data):
-        """
-        Create the Document instance, handle file saving, and associate session.
-        """
-        file = validated_data["file"]
-        user = self.context["request"].user
-        title = validated_data.get("title") or file.name
-        ext = os.path.splitext(file.name)[1].lower()
-        unique_filename = f"{uuid.uuid4()}{ext}"
-        path = default_storage.save(f"documents/{unique_filename}", file)
-        full_path = os.path.join(settings.MEDIA_ROOT, path)
+        request = self.context["request"]
+        user = request.user
+        session = self.context.get("session")
+        f = validated_data["file"]
 
-        # Retrieve session from context
-        session = validated_data["session"]
-        print("*************serializer session", session.__dict__)
-        document = Document.objects.create(
-            user=user,
+        # Compute checksum + collect bytes (for DB storage)
+        hasher = hashlib.sha256()
+        chunks = []
+        for chunk in f.chunks():
+            hasher.update(chunk)
+            chunks.append(chunk)
+        blob = b"".join(chunks)
+        checksum = hasher.hexdigest()
+
+        file_name = f.name
+        title = validated_data.get("title") or os.path.splitext(file_name)[0]
+        ext = os.path.splitext(file_name)[1].lstrip(".")[:16]
+        mime = getattr(f, "content_type", "")
+
+        doc = Document.objects.create(
             title=title,
-            file_name=file.name,
-            file_path=full_path,
-            file_type=ext.lstrip("."),
-            file_size=file.size,
-            status="pending",
+            file_name=file_name,
+            file_ext=ext,
+            file_mime=mime,
+            file_size=f.size,
+            checksum=checksum,
+            user=user,
             session=session,
+            status=Document.STATUS_PENDING,
         )
 
-        return document
+        FileAsset.objects.create(
+            document=doc,
+            blob=blob,
+            size=f.size,
+            mime_type=mime,
+            checksum=checksum,
+        )
+        return doc
 
 
-class BulkDocumentUploadSerializer(serializers.Serializer):
-    """
-    Serializer for bulk document upload
-    """
-
-    files = serializers.ListField(
-        child=serializers.FileField(),
-        write_only=True,
-        allow_empty=False,
-        max_length=10,  # Limit to 10 files per bulk upload
-    )
-
-    def validate_files(self, files):
-        """
-        Validate all uploaded files
-        """
-        if len(files) > 10:
-            raise serializers.ValidationError(
-                "Maximum 10 files allowed per bulk upload"
-            )
-
-        allowed_extensions = [".pdf", ".doc", ".docx"]
-        processor = DocumentProcessor()
-
-        for file in files:
-            # Check file extension
-            file_extension = file.name.lower().split(".")[-1]
-            if f".{file_extension}" not in allowed_extensions:
-                raise serializers.ValidationError(
-                    f"File '{file.name}': Unsupported file type. Allowed types: {', '.join(allowed_extensions)}"
-                )
-
-            # Use DocumentProcessor for additional validation
-            is_valid, error_message = processor.validate_file(file, file_extension)
-            if not is_valid:
-                raise serializers.ValidationError(
-                    f"File '{file.name}': {error_message}"
-                )
-
-        return files
-
-
-class DocumentSerializer(serializers.ModelSerializer):
-    """
-    Detailed serializer for Document
-    """
-
+class DocumentListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Document
-        fields = [
+        fields = (
             "id",
             "title",
             "file_name",
-            "file_path",
-            "file_type",
+            "file_ext",
+            "file_mime",
             "file_size",
             "status",
+            "created_at",
+            "updated_at",
+            "session",
+        )
+        read_only_fields = fields
+
+
+class DocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Document
+        fields = (
+            "id",
+            "title",
+            "file_name",
+            "file_ext",
+            "file_mime",
+            "file_size",
+            "status",
+            "processing_error",
             "summary",
             "risk_factors",
             "created_at",
             "updated_at",
-        ]
-        read_only_fields = [
-            "id",
-            "file_name",
-            "file_path",
-            "file_size",
-            "file_type",
-            "created_at",
-            "updated_at",
-        ]
+            "session",
+        )
+        read_only_fields = fields
 
 
 class DocumentSummarySerializer(serializers.Serializer):
@@ -153,40 +112,6 @@ class DocumentRiskFactorsSerializer(serializers.Serializer):
     document_id = serializers.IntegerField(required=True)
     risk_factors = serializers.JSONField(required=True)
     response = serializers.CharField(required=False)
-
-
-from chat.models import ChatSession
-from chat.serializers import SessionSerializer
-
-
-class DocumentListSerializer(serializers.ModelSerializer):
-    """
-    Simplified serializer for listing documents
-    """
-
-    session = SessionSerializer(read_only=True)
-
-    class Meta:
-        model = Document
-        fields = [
-            "id",
-            "title",
-            "file_name",
-            "file_type",
-            "file_size",
-            "status",
-            "session",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = [
-            "id",
-            "file_name",
-            "file_size",
-            "file_type",
-            "created_at",
-            "updated_at",
-        ]
 
 
 class BulkUploadResponseSerializer(serializers.Serializer):

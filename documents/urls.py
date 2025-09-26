@@ -4,44 +4,43 @@ from . import views
 app_name = "documents"
 
 urlpatterns = [
-    # Document management endpoints
+    # Upload
     path("upload/", views.DocumentUploadView.as_view(), name="upload"),
-    path(
-        "<uuid:document_id>/has-session/",
-        views.DocumentHasSessionView.as_view(),
-        name="document-has-session",
-    ),
+    # Collection & item
     path("", views.DocumentListView.as_view(), name="list"),
-    path("<uuid:pk>/", views.DocumentDetailView.as_view(), name="detail"),
     path(
-        "<uuid:session_id>/documents/",
-        views.SessionDocumentsView.as_view(),
-        name="session_documents",
-    ),
-    # path('<uuid:document_id>/reprocess/', views.reprocess_document, name='reprocess'),
-    path(
-        "session/<uuid:session_id>/risk-factors/",
-        views.SessionRiskFactorsView.as_view(),
-        name="session_risk_factors",
-    ),
-    path(
-        "session/<uuid:session_id>/summaries/",
-        views.SessionSummariesView.as_view(),
-        name="session_summaries",
-    ),
-    path(
-        "<uuid:document_id>/soft-delete/",
-        views.DocumentSoftDeleteView.as_view(),
-        name="document-soft-delete",
-    ),
+        "<uuid:pk>/", views.DocumentDetailView.as_view(), name="detail"
+    ),  # DELETE here supports soft/hard via ?soft=
+    # AI-generated content (POST)
     path(
         "<uuid:document_id>/summary/",
-        views.DocumentSummaryGenerator.as_view(),
+        views.DocumentSummaryView.as_view(),
         name="document-summary",
     ),
     path(
         "<uuid:document_id>/risk-factors/",
-        views.RiskFactorsGenerator.as_view(),
+        views.RiskFactorsView.as_view(),
         name="document-risk-factors",
+    ),
+    # Session-scoped collections (prefixed with 'session/' to avoid UUID route collisions)
+    path(
+        "session/<uuid:session_id>/documents/",
+        views.SessionDocumentsView.as_view(),
+        name="session-documents",
+    ),
+    path(
+        "session/<uuid:session_id>/risk-factors/",
+        views.SessionRiskFactorsView.as_view(),
+        name="session-risk-factors",
+    ),
+    path(
+        "session/<uuid:session_id>/summaries/",
+        views.SessionSummariesView.as_view(),
+        name="session-summaries",
+    ),
+    path(
+        "<uuid:document_id>/download/",
+        views.DocumentDownloadView.as_view(),
+        name="document-download",
     ),
 ]
