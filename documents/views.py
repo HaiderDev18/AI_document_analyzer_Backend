@@ -97,7 +97,7 @@ class DocumentUploadView(generics.CreateAPIView):
             with os.fdopen(fd, "wb") as tmp:
                 tmp.write(asset.blob)
 
-            text = extract_text_from_files([tmp_path])  # ephemeral; not stored
+            text = extract_text_from_files([tmp_path])
 
             PineconeEmbedding(namespace=namespace).main(
                 text=text,

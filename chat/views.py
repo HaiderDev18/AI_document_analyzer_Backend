@@ -3,15 +3,12 @@ from rest_framework.response import Response
 from .models import ChatSession, ChatMessage
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
-from rest_framework.views import APIView
 from .serializers import (
     ChatSessionListSerializer,
     ChatSessionSerializer,
     ChatMessageSerializer,
     OnlyChatSessionSerializer,
 )
-from documents.serializers import DocumentSerializer
-from documents.models import Document
 from documents.services.pinecone_service import PineconeEmbedding
 from documents.services.openai_service import OpenAIService
 
@@ -190,8 +187,6 @@ class ChatView(generics.CreateAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        from documents.services.openai_service import OpenAIService
-
         openai_service = OpenAIService()
         pinecone_embedding = PineconeEmbedding(namespace=session.namespace)
         # Proceed with saving the message and generating the AI response
@@ -208,11 +203,20 @@ class ChatView(generics.CreateAPIView):
             # Search for relevant context in user's documents
             search_results = pinecone_embedding.similarity_search(message)
 
+            matches = []
+            if isinstance(search_results, dict):
+                matches = search_results.get("matches", [])
+            else:
+                matches = getattr(search_results, "matches", []) or []
+
             context_texts = []
-            if search_results and "matches" in search_results:
-                for match in search_results["matches"]:
-                    if hasattr(match, "metadata") and "text" in match.metadata:
-                        context_texts.append(match.metadata["text"])
+            for m in matches:
+                md = getattr(m, "metadata", None) or m.get(
+                    "metadata", {}
+                )  # handle both
+                t = md.get("text")
+                if t:
+                    context_texts.append(t)
 
             # Generate response using context
             if context_texts:

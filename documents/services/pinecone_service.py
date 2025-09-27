@@ -1,432 +1,293 @@
-from pinecone import Pinecone, ServerlessSpec
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from openai import OpenAI
-from typing import List, Dict, Any
-from pathlib import Path
+from __future__ import annotations
+from typing import List, Dict, Any, Optional
 from datetime import datetime
-from dotenv import load_dotenv
-import os
+import hashlib
 
-load_dotenv()
+from django.conf import settings
+from pinecone import Pinecone, ServerlessSpec
+from openai import OpenAI
+from pinecone.openapi_support.exceptions import NotFoundException
 
-# Initialize OpenAI client with error handling
-openai_key = os.getenv("OPENAI_API_KEY")
 try:
-    if openai_key and not openai_key.startswith("placeholder"):
-        client = OpenAI(api_key=openai_key)
-    else:
-        print("OpenAI key is not set")
-        client = None
+    from documents.services.chunking import chunk_text
 except Exception:
-    print("OpenAI key is not set")
-    client = None
 
-# Initialize Pinecone with error handling
-pinecone_key = os.getenv("PINECONE_API_KEY")
-try:
-    if pinecone_key and not pinecone_key.startswith("placeholder"):
-        pc = Pinecone(api_key=pinecone_key)
-    else:
-        print("Pinecone key is not set")
-        pc = None
-except Exception:
-    print("Pinecone key is not set")
-    pc = None
+    def chunk_text(
+        text: str,
+        max_tokens: int = 800,
+        overlap_tokens: int = 120,
+        token_model: str = "cl100k_base",
+    ):
+        paras = [
+            p.strip() for p in text.replace("\r\n", "\n").split("\n\n") if p.strip()
+        ]
+        chunks = []
+        for i, p in enumerate(paras):
+            h = hashlib.sha256(p.encode("utf-8")).hexdigest()
+            chunks.append({"text": p, "hash": h, "index": i})
+        return chunks
+
+
+def _model_for_dim(dim: int) -> str:
+    return "text-embedding-3-large" if dim == 3072 else "text-embedding-3-small"
+
+
+def _embedding_dim(model_name: str) -> int:
+    return 3072 if "large" in model_name else 1536
 
 
 class PineconeEmbedding:
-    def __init__(self, index_name="ai-docs-index", namespace="new-chapters"):
-        self.pinecone_key = os.getenv("PINECONE_API_KEY")
-        self.index_name = index_name
-        self.dimension = 3072
-        self.doc_path = None
-        self.namespace = namespace
-        self.pc = Pinecone(api_key=self.pinecone_key)
-        try:
-            self.index = self.pc.Index(self.index_name) if self.index_name else None
-        except Exception as e:
-            self.index = self.create_serverless_index()
-            print(f"Error initializing Pinecone index: {str(e)}")
+    """
+    Chunk → embed → upsert to Pinecone, idempotent per-document.
 
-        # self.mongodb_service = MongoDBService()
+    - Deterministic vector IDs: <doc_id>:<chunk_index>:<hash8>
+    - Deletes previous vectors for the same document (in the same namespace) before upsert
+    - Metadata kept concise; includes 'text' (optionally truncate if you want)
+    """
 
-    def create_serverless_index(self):
-        index = self.pc.create_index(
-            name=self.index_name,
-            dimension=self.dimension,
-            metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+    def __init__(
+        self,
+        index_name: Optional[str] = None,
+        namespace: Optional[str] = None,
+        embed_model: Optional[str] = None,
+        region: Optional[str] = None,
+    ):
+        self.index_name = index_name or getattr(
+            settings, "PINECONE_INDEX_NAME", "ai-docs-index"
         )
-        return index
+        self.namespace = namespace or "default"
+        self.embed_model = embed_model or getattr(
+            settings, "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+        )
+        self.dimension = _embedding_dim(self.embed_model)
+        self.region = region or getattr(settings, "PINECONE_REGION", "us-east-1")
 
-    def list_namespaces(self) -> list:
-        """
-        List all existing namespaces in a Pinecone index
-        Returns list of namespace names (strings)
-        """
+        # Clients
+        api_key = getattr(settings, "PINECONE_API_KEY", None)
+        if not api_key:
+            raise RuntimeError("PINECONE_API_KEY not configured")
+        self.pc = Pinecone(api_key=api_key)
+
+        oai_key = getattr(settings, "OPENAI_API_KEY", None)
+        if not oai_key:
+            raise RuntimeError("OPENAI_API_KEY not configured")
+        self.oa = OpenAI(api_key=oai_key)
+
+        # Ensure index
+        self._ensure_index()
+        self.index = self.pc.Index(self.index_name)
+
+    # ---------- Index / namespace utilities ----------
+
+    def _ensure_index(self):
+        if not self.pc.has_index(self.index_name):
+            # create with the requested model's dim
+            self.pc.create_index(
+                name=self.index_name,
+                dimension=self.dimension,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region=self.region),
+            )
+        else:
+            desc = self.pc.describe_index(self.index_name)
+            idx_dim = getattr(desc, "dimension", None)
+            if not idx_dim:
+                raise RuntimeError(
+                    f"Could not read dimension for index {self.index_name}"
+                )
+
+            # If index exists with a different dim, switch the embed model to match the index
+            if idx_dim != self.dimension:
+                self.dimension = idx_dim
+                self.embed_model = _model_for_dim(idx_dim)
+
+    def list_namespaces(self) -> List[str]:
+        stats = self.pc.Index(self.index_name).describe_index_stats()
+        return list(stats.get("namespaces", {}).keys())
+
+    def delete_namespace_index(self, namespace: Optional[str] = None):
+        ns = namespace or self.namespace
         try:
-            index = self.pc.Index(self.index_name)
-            # Get index statistics
-            stats = index.describe_index_stats()
+            self.pc.Index(self.index_name).delete(delete_all=True, namespace=ns)
+        except NotFoundException:
+            return
 
-            # Extract namespaces from statistics
-            namespaces = list(stats.get("namespaces", {}).keys())
-
-            return namespaces
-
-        except Exception as e:
-            print(f"Error listing namespaces: {str(e)}")
-            return []
-
-    def namespace_exists(self, index, namespace: str) -> bool:
-        """Check if a namespace exists in the Pinecone index"""
-        stats = index.describe_index_stats()
-        return namespace in stats["namespaces"]
-
-    def get_vectors_namespace(self, namespace: str = None):
-        """Get vectors from a namespace in Pinecone index"""
+    def _delete_vectors_for_document(self, document_id: str):
+        """Remove previous vectors for this document within this namespace (if present)."""
+        # Skip if namespace doesn't exist yet (first upsert will create it)
+        if not self._namespace_exists():
+            return
         try:
-            if namespace:
-                index = self.pc.Index(self.index_name)
-                vectors = index.list(namespace=namespace)
-                return vectors
-            else:
-                index = self.pc.Index(self.index_name)
-                # vectors = index.list(namespace=self.namespace)
-                all_ids = []
-                vectors = None
-                for ids in index.list(namespace=self.namespace):
-                    all_ids.append(ids)
+            self.index.delete(
+                namespace=self.namespace,
+                filter={"document_id": {"$eq": document_id}},
+            )
+        except NotFoundException:
+            # 404 when ns doesn't exist or nothing matched — treat as no-op
+            return
 
-                    vectors = index.fetch(ids=ids, namespace=self.namespace)
+    # ---------- Embeddings ----------
 
-                return vectors
-        except Exception as e:
-            print(f"Error getting vectors: {str(e)}")
-            return []
+    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+        resp = self.oa.embeddings.create(model=self.embed_model, input=texts)
+        return [d.embedding for d in resp.data]
 
-    def delete_namespace_index(self, namespace: str = None):
-        """Delete a namespace from Pinecone index"""
-        try:
-            if namespace:
-                index = self.pc.Index(self.index_name)
-                index.delete(delete_all=True, namespace=namespace)
-
-            else:
-                print(f"Deleting namespace '{self.namespace}'...")
-                index = self.pc.Index(self.index_name)
-                index.delete(delete_all=True, namespace=self.namespace)
-
-        except Exception as e:
-            print(f"Error deleting namespace: {str(e)}")
-            print(f"Namespace '{self.namespace}' does not exist")
+    # ---------- Public API ----------
 
     def create_vector_embeddings(
         self,
-        context: List[str],
-        id: str = None,
-        file_name: str = None,
-        file_path: str = None,
-        project_id: str = None,
-        user=None,
-    ) -> List[Dict]:
+        text: str,
+        *,
+        document_id: Optional[str],
+        file_name: Optional[str],
+        file_path: Optional[str],
+        user: Any = None,
+        truncate_metadata_text_to: Optional[int] = None,  # e.g., 1000 chars
+    ) -> List[Dict[str, Any]]:
         """
-        Generate embeddings with enhanced chunking and metadata.
-
-        Args:
-            context (List[str]): List of text content to process
-            id (str, optional): Document ID
-            file_name (str, optional): Original file name
-            file_path (str, optional): Path to the source file
-            user: User object for analytics tracking
-
-        Returns:
-            List[Dict]: List of vectors with embeddings and metadata
+        Chunk a single text, embed, and build Pinecone vectors (not upserted yet).
         """
-        try:
-            # Text splitting configuration
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=3000,
-                chunk_overlap=300,
-                length_function=len,
-                separators=["\n\n", "\n", " "],
-            )
-            chunks = text_splitter.split_text(context)
+        chunks = chunk_text(text, max_tokens=800, overlap_tokens=120)
+        if not chunks:
+            return []
 
-            # Process each text in context
-            embeddings = []
+        vectors: List[Dict[str, Any]] = []
+        BATCH = 100
+        for i in range(0, len(chunks), BATCH):
+            batch = chunks[i : i + BATCH]
+            embeds = self._embed_batch([c["text"] for c in batch])
+            for c, vec in zip(batch, embeds):
+                meta_text = c["text"]
+                if (
+                    truncate_metadata_text_to
+                    and len(meta_text) > truncate_metadata_text_to
+                ):
+                    meta_text = meta_text[:truncate_metadata_text_to]
 
-            # Process each chunk
-            for chunk_idx, chunk_text in enumerate(chunks):
-                # print(f"\n\nProcessing chunk: {chunk_idx} for document ID: {id}")
-
-                result = client.embeddings.create(
-                    input=chunk_text, model="text-embedding-3-large"
+                # Deterministic vector ID for idempotency
+                base = f"{document_id or 'noid'}:{c['index']}:{c['hash'][:8]}"
+                vectors.append(
+                    {
+                        "id": base,
+                        "values": vec,
+                        "metadata": {
+                            "document_id": document_id,
+                            "file_name": file_name,
+                            "file_path": file_path,
+                            "chunk_index": c["index"],
+                            "chunk_hash": c["hash"],
+                            "text": meta_text,
+                            "embedding_model": self.embed_model,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        },
+                    }
                 )
+        return vectors
 
-                # Track embedding usage for analytics
-                if user:
-                    try:
-                        from analytics.services import AnalyticsHelper
-
-                        AnalyticsHelper.log_embedding_usage(
-                            user=user,
-                            openai_response=result,
-                            text_length=len(chunk_text),
-                        )
-                    except Exception as analytics_error:
-                        print(f"Analytics tracking error: {analytics_error}")
-
-                # Create a unique ID for each chunk
-                if id:
-                    unique_chunk_id = f"{id}-chunk-{chunk_idx}"
-                else:
-                    unique_chunk_id = f"doc_unknown-chunk-{chunk_idx}"
-
-                # print(f"Generated unique_chunk_id: {unique_chunk_id}")
-                # print(f"Chunk text: {chunk_text}...") # Print only start of chunk
-                # create a unique id for the document
-                document_id = f"{id}-{file_name}"
-                metadata = {
-                    "document_id": document_id,
-                    "file_name": file_name,
-                    "file_path": file_path,
-                    "chunk_index": chunk_idx,
-                    "total_chunks": len(chunks),
-                    "chunk_size": len(chunk_text),
-                    "text": chunk_text,  # Storing the actual chunk text in metadata is crucial for RAG
-                    "timestamp": datetime.now().isoformat(),
-                    "embedding_model": "text-embedding-3-large",
-                }
-
-                vector = {
-                    "id": unique_chunk_id,  # Use the unique ID for the vector
-                    "values": result.data[0].embedding,
-                    "metadata": metadata,
-                }
-
-                embeddings.append(vector)
-
-            if not embeddings:
-                print(f"No embeddings generated for document ID: {id}")
-                return None
-
-            return embeddings
-
-        except Exception as e:
-            print(f"Error creating vector embeddings: {str(e)}")
-            return None
-
-    def upsert_generated_vector_embeddings(self, vectors: List[Dict[str, Any]]):
-        """
-        Upsert vectors to Pinecone index.
-
-        Args:
-            vectors (List[Dict[str, Any]]): List of vectors with embeddings and metadata.
-        """
-        index = self.pc.Index(self.index_name)
-
-        # Batch upsert to optimize performance
-        if self.namespace:
-            batch_size = 20
-            for i in range(0, len(vectors), batch_size):
-                batch = vectors[i : i + batch_size]
-                try:
-                    index.upsert(vectors=batch, namespace=self.namespace)
-                except Exception as e:
-                    print(f"Error upserting batch: {str(e)}")
-                    raise
-        index = self.pc.Index(self.index_name)
-        return index
-
-    def similarity_search(self, query, top_k=7):
-        """Search Pinecone index for similar vectors"""
+    def _namespace_exists(self) -> bool:
+        """Return True if namespace exists; False otherwise."""
         try:
-            embedding = client.embeddings.create(
-                input=[query], model="text-embedding-3-large"
-            )
+            stats = self.index.describe_index_stats()
+            return self.namespace in (stats.get("namespaces") or {})
+        except Exception:
+            # If stats call fails, be conservative
+            return False
 
-            results = self.pc.Index(self.index_name).query(
-                namespace=self.namespace,
-                vector=embedding.data[0].embedding,
-                top_k=top_k,
-                include_metadata=True,
-            )
-            if not os.path.exists("uploads"):
-                os.makedirs("uploads")
-            with open(f"uploads/query_similarity_results.txt", "w") as f:
-                f.write(str(results))
-            return results
-        except Exception as e:
-            print(f"Error in similarity search: {str(e)}")
-            return None
+    def upsert_vectors(self, vectors: List[Dict[str, Any]]):
+        if not vectors:
+            return
+        BATCH = 100
+        for i in range(0, len(vectors), BATCH):
+            self.index.upsert(vectors=vectors[i : i + BATCH], namespace=self.namespace)
 
-    def generate_response(self, query, search_results):
-        """Generate LLM response using context from search results"""
-        if search_results["matches"]:
-            context = "\n".join(
-                [f"- {match.metadata['text']}" for match in search_results["matches"]]
-            )
-
-            user_prompt = f"""Answer the question based on the context below. 
-            You are a helpful assistant of knowledge base. You will assist the user with their questions based on the context provided.
-            If context is not provided, this question is not relevant to the context that is stored in the knowledge base.
-            You need to answer the question based on the context provided. The answer should be in a good format and should be clear and not too concise.
-            Context: {context}
-            
-            Question: {query}
-            Answer: """
-
-            response = client.chat.completions.create(
-                model="o1-mini",  # Use the appropriate GPT model
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            return response
-        else:
-            context = "No relevant context found for the question. Please try to save document in embeddings"
-            user_prompt = f"""Answer the question based on the context below. 
-            You are a helpful assistant of knowledge base. You will assist the user with their questions based on the context provided.
-            If context is not provided, this question is not relevant to the context that is stored in the knowledge base.
-            You need to answer the question based on the context provided. The answer should be in a good format and should be clear and not too concise.
-            Context: {context}
-            
-            Question: {query}
-            Answer: """
-
-            response = client.chat.completions.create(
-                model="o1-mini",  # Use the appropriate GPT model
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            return response
+    def similarity_search(self, query: str, top_k: int = 7):
+        emb = self._embed_batch([query])[0]
+        return self.index.query(
+            namespace=self.namespace,
+            vector=emb,
+            top_k=top_k,
+            include_metadata=True,
+        )
 
     def main(
         self,
-        delete_namespace=None,
-        text=None,
-        id=None,
-        file_name=None,
-        file_path=None,
-        user=None,
+        *,
+        text: Optional[str],
+        id: Optional[str] = None,
+        file_name: Optional[str] = None,
+        file_path: Optional[str] = None,
+        user: Any = None,
+        delete_namespace: Optional[str] = None,
+        truncate_metadata_text_to: Optional[int] = 1200,
     ):
-        if not self.pc.has_index(self.index_name):
-            self.index = self.create_serverless_index()
-        else:
-            self.pc.describe_index(self.index_name)
-            # print("this is the index: ", self.pc.describe_index(self.index_name))
-            self.index = self.pc.Index(self.index_name)
-        if id is None:
-            if file_name:
-                id = file_name[:30]
-            else:
-                id = "doc_unknown"
+        """
+        Entry point kept compatible with your view.
+        - If file_path is like 'db://<uuid>', we treat that UUID as the canonical document_id.
+        - Otherwise we fall back to `id` or a hash of `file_name+text`.
+        """
+        # Optional: nuke a namespace (used rarely)
+
         if delete_namespace:
-            if self.namespace_exists(self.index_name, delete_namespace):
-                self.delete_namespace_index(self.index_name, delete_namespace)
-            else:
-                print(f"Namespace '{delete_namespace}' does not exist")
+            self.delete_namespace_index(delete_namespace)
 
-        if text:
-            print("Entered the text if statement")
-            embeddings = self.create_vector_embeddings(
-                text, id=id, file_name=file_name, file_path=file_path, user=user
-            )
-            if self.namespace:
-                index = self.upsert_generated_vector_embeddings(embeddings)
-            else:
-                index = self.upsert_generated_vector_embeddings(embeddings)
+        # Document identity
+        document_id = self._parse_document_id(file_path) or id
+        if not document_id:
+            seed = (file_name or "") + (text or "")[:128]
+            document_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+        # Idempotency: clear old vectors for this document in this namespace
+        if self._namespace_exists():
+            self._delete_vectors_for_document(document_id)
+        # else: no-op; upsert will auto-create the namespace
+
+        # Create vectors (chunk → embed)
+        vectors = self.create_vector_embeddings(
+            text=text or "",
+            document_id=document_id,
+            file_name=file_name,
+            file_path=file_path,
+            user=user,
+            truncate_metadata_text_to=truncate_metadata_text_to,
+        )
+        # Upsert
+        self.upsert_vectors(vectors)
+        return {
+            "upserted": len(vectors),
+            "document_id": document_id,
+            "namespace": self.namespace,
+        }
+
+    @staticmethod
+    def _parse_document_id(file_path: Optional[str]) -> Optional[str]:
+        # expects "db://<uuid>" from your view
+        if not file_path or not file_path.startswith("db://"):
+            return None
+        return file_path.split("db://", 1)[1]
 
 
+# Optional thin wrapper if you want a service facade with extra helpers
 class PineconeService:
-    """
-    Service class for Pinecone vector operations using the existing PineconeEmbedding class
-    """
-
-    def __init__(self, namespace: str = None):
-        from django.conf import settings
-
-        self.index_name = settings.PINECONE_INDEX_NAME
+    def __init__(self, namespace: Optional[str] = None):
+        self.index_name = getattr(settings, "PINECONE_INDEX_NAME", "ai-docs-index")
         self.namespace = namespace
-        self.pinecone_embedding = PineconeEmbedding(
+        self.engine = PineconeEmbedding(
             index_name=self.index_name, namespace=self.namespace
         )
 
-    def store_document_chunks(
-        self, document_id: str, chunks_data: List[Dict], file_name: str, file_path: str
+    def store_text(
+        self, *, document_id: str, text: str, file_name: str, file_path: str
     ):
-        """
-        Store document chunks in Pinecone using the existing PineconeEmbedding class
-        """
-        try:
-            # Prepare text for embedding
-            text_content = "\n".join([chunk["text"] for chunk in chunks_data])
+        # Clears old vectors for this document and re-upserts new ones
+        return self.engine.main(
+            text=text, id=document_id, file_name=file_name, file_path=file_path
+        )
 
-            # Use the existing create_vector_embeddings method
-            embeddings = self.pinecone_embedding.create_vector_embeddings(
-                context=text_content,
-                id=document_id,
-                file_name=file_name,
-                file_path=file_path,
-            )
+    def search(self, query: str, top_k: int = 7):
+        return self.engine.similarity_search(query, top_k=top_k)
 
-            if embeddings:
-                # Upsert the embeddings
-                self.pinecone_embedding.upsert_generated_vector_embeddings(embeddings)
-                return True
-            return False
+    def wipe_document(self, document_id: str):
+        self.engine._delete_vectors_for_document(document_id)
 
-        except Exception as e:
-            raise Exception(f"Error storing document chunks: {str(e)}")
-
-    def search_similar_chunks(
-        self, query_embedding: List[float], user_id: str = None, top_k: int = 4
-    ):
-        """
-        Search for similar chunks using the existing similarity search
-        """
-        try:
-            # Convert embedding to query text for the existing method
-            # Note: This is a workaround since the existing method expects a query string
-            # In a real implementation, you'd modify the existing method to accept embeddings directly
-
-            # For now, we'll use the index directly
-            index = self.pinecone_embedding.pc.Index(self.index_name)
-            results = index.query(
-                namespace=self.namespace,
-                vector=query_embedding,
-                top_k=top_k,
-                include_metadata=True,
-            )
-
-            return results.matches if results else []
-
-        except Exception as e:
-            raise Exception(f"Error searching similar chunks: {str(e)}")
-
-    def delete_vectors_by_filter(self, filter_dict: Dict):
-        """
-        Delete vectors by filter
-        """
-        try:
-            index = self.pinecone_embedding.pc.Index(self.index_name)
-            index.delete(namespace=self.namespace, filter=filter_dict)
-        except Exception as e:
-            raise Exception(f"Error deleting vectors: {str(e)}")
-
-    def delete_namespace(self):
-        """
-        Delete entire namespace
-        """
-        try:
-            self.pinecone_embedding.delete_namespace_index(self.namespace)
-        except Exception as e:
-            raise Exception(f"Error deleting namespace: {str(e)}")
-
-    def create_index_if_not_exists(self):
-        """
-        Create index if it doesn't exist
-        """
-        try:
-            if not self.pinecone_embedding.pc.has_index(self.index_name):
-                self.pinecone_embedding.create_serverless_index()
-        except Exception as e:
-            raise Exception(f"Error creating index: {str(e)}")
+    def wipe_namespace(self):
+        self.engine.delete_namespace_index(self.namespace)

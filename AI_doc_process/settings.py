@@ -258,7 +258,7 @@ EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 OPENAI_API_KEY = config("OPENAI_API_KEY", default="")
 OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-3.5-turbo")
 OPENAI_EMBEDDING_MODEL = config(
-    "OPENAI_EMBEDDING_MODEL", default="text-embedding-ada-002"
+    "OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small"
 )
 OPENAI_MAX_TOKENS = config("OPENAI_MAX_TOKENS", default=1000, cast=int)
 
