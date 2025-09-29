@@ -263,8 +263,8 @@ class DocumentDownloadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, document_id):
-        doc = get_object_or_404(
-            Document, id=document_id, user=request.user, deleted_at__isnull=True
+        doc = Document.objects.get(
+            id=document_id, deleted_at__isnull=True
         )
         asset = doc.asset
         response = HttpResponse(
