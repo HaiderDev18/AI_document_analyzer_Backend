@@ -247,6 +247,7 @@ AI Operation → Token Extraction → Usage Logging → Summary Updates → Dash
 git clone <repository-url>
 cd AI_Doc_Process_Backend
 
+# Make sure you have Python 3.12.6 installed for optimal performance.
 # Setup virtual environment
 python -m venv drf_env
 source drf_env/bin/activate  # On Windows: drf_env\Scripts\activate
