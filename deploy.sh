@@ -8,8 +8,8 @@ pip install -r requirements.txt
 
 # Create database if it doesn't exist (for Docker PostgreSQL)
 echo "Setting up database..."
-docker exec -it be-document-analyzer-postgres-1 psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'ai_doc_process'" | grep -q 1 || \
-docker exec -it be-document-analyzer-postgres-1 psql -U postgres -c "CREATE DATABASE ai_doc_process"
+docker exec -it be-document-analyzer-postgres-1 psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'postgres_doc'" | grep -q 1 || \
+docker exec -it be-document-analyzer-postgres-1 psql -U postgres -c "CREATE DATABASE postgres_doc"
 
 # Collect static files
 echo "Collecting static files..."

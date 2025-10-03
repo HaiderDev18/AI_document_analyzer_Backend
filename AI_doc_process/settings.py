@@ -13,7 +13,6 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 from decouple import config
 from datetime import timedelta
-import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -99,16 +98,23 @@ WSGI_APPLICATION = "AI_doc_process.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 # print("Here is the database url ",os.environ.get('DATABASE_URL'))
+
+
+
+
 DATABASES = {
-    "default": dj_database_url.config(
-        default=config(
-            "DATABASE_URL",
-            # use 127.0.0.1 instead of localhost
-            default="postgresql://postgres:postgres@127.0.0.1:5432/postgres",
-        ),
-        conn_max_age=600,
-        ssl_require=False,
-    )
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": config("POSTGRES_DB", default="postgres_doc"),
+        "USER": config("POSTGRES_USER", default="powerfuluser"),
+        "PASSWORD": config("POSTGRES_PASSWORD", default="powerfulpassword"),
+        "HOST": config("POSTGRES_HOST", default="127.0.0.1"),
+        "PORT": config("POSTGRES_PORT", default="5432"),
+        "OPTIONS": {
+            "application_name": "ai_doc_process"
+        },
+        "CONN_MAX_AGE": 600,
+    }
 }
 DATABASES["default"].setdefault("OPTIONS", {})
 DATABASES["default"]["OPTIONS"]["application_name"] = "ai_doc_process"
