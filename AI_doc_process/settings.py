@@ -103,10 +103,15 @@ DATABASES = {
     "default": dj_database_url.config(
         default=config(
             "DATABASE_URL",
-            default="postgresql://postgres:postgres@localhost:5432/ai_doc_process",
-        )
+            # use 127.0.0.1 instead of localhost
+            default="postgresql://postgres:postgres@127.0.0.1:5432/ai_doc_process",
+        ),
+        conn_max_age=600,
+        ssl_require=False,
     )
 }
+DATABASES["default"].setdefault("OPTIONS", {})
+DATABASES["default"]["OPTIONS"]["application_name"] = "ai_doc_process"
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
