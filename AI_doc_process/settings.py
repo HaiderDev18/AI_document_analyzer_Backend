@@ -104,7 +104,7 @@ DATABASES = {
         default=config(
             "DATABASE_URL",
             # use 127.0.0.1 instead of localhost
-            default="postgresql://postgres:postgres@127.0.0.1:5432/ai_doc_process",
+            default="postgresql://postgres:postgres@127.0.0.1:5432/postgres",
         ),
         conn_max_age=600,
         ssl_require=False,
