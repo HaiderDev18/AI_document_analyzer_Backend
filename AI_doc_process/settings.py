@@ -267,16 +267,16 @@ EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 
 # OpenAI Configuration
 OPENAI_API_KEY = config("OPENAI_API_KEY", default="")
-OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-3.5-turbo")
+OPENAI_MODEL = config("OPENAI_MODEL", default="o3")
 OPENAI_EMBEDDING_MODEL = config(
-    "OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small"
+    "OPENAI_EMBEDDING_MODEL", default="text-embedding-3-large"
 )
 OPENAI_MAX_TOKENS = config("OPENAI_MAX_TOKENS", default=1000, cast=int)
 
 # Pinecone Configuration
 PINECONE_API_KEY = config("PINECONE_API_KEY", default="")
 PINECONE_ENVIRONMENT = config("PINECONE_ENVIRONMENT", default="")
-PINECONE_INDEX_NAME = config("PINECONE_INDEX_NAME", default="ai-doc-process")
+PINECONE_INDEX_NAME = config("PINECONE_INDEX_NAME", default="ai-docs-index-3072")
 
 # Document Processing Settingse
 MAX_FILE_SIZE_MB = config("MAX_FILE_SIZE_MB", default=10, cast=int)

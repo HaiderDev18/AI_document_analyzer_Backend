@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import hashlib
+import re
 
 from django.conf import settings
 from pinecone import Pinecone, ServerlessSpec
@@ -34,6 +35,22 @@ def _model_for_dim(dim: int) -> str:
 
 def _embedding_dim(model_name: str) -> int:
     return 3072 if "large" in model_name else 1536
+
+
+# Helper to infer section labels from chunk text
+def _infer_section_label(text: str) -> Optional[str]:
+    """
+    Cheap heuristic to tag chunks with a section label like "6.0 RETENTION" if present
+    at the beginning of the chunk. Helps retrieval ranking and UX display.
+    """
+    try:
+        head = (text or "").strip().split("\n", 1)[0][:120]
+        m = re.search(r"\b(\d+(?:\.\d+)*)\s+([A-Z][A-Za-z\s]{2,})\b", head)
+        if m:
+            return f"{m.group(1)} {m.group(2).strip()}"
+    except Exception:
+        return None
+    return None
 
 
 class PineconeEmbedding:
@@ -147,7 +164,9 @@ class PineconeEmbedding:
         """
         Chunk a single text, embed, and build Pinecone vectors (not upserted yet).
         """
-        chunks = chunk_text(text, max_tokens=800, overlap_tokens=120)
+        max_tokens = getattr(settings, "CHUNK_SIZE", 1000)
+        overlap_tokens = getattr(settings, "CHUNK_OVERLAP", 200)
+        chunks = chunk_text(text, max_tokens=max_tokens, overlap_tokens=overlap_tokens)
         if not chunks:
             return []
 
@@ -166,20 +185,31 @@ class PineconeEmbedding:
 
                 # Deterministic vector ID for idempotency
                 base = f"{document_id or 'noid'}:{c['index']}:{c['hash'][:8]}"
+                # Build metadata without nulls (Pinecone rejects null values)
+                metadata: Dict[str, Any] = {
+                    "document_id": document_id,
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "chunk_index": c["index"],
+                    "chunk_hash": c["hash"],
+                    "text": meta_text,
+                    "embedding_model": self.embed_model,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                inferred = _infer_section_label(meta_text)
+                if inferred:
+                    metadata["section_label"] = inferred
+                # Financial tagging to help filtering/boosting
+                try:
+                    if re.search(r"£[\d,]+|contractor shall pay|subcontract sum", meta_text, re.I):
+                        metadata["contains_financial_info"] = True
+                except Exception:
+                    pass
                 vectors.append(
                     {
                         "id": base,
                         "values": vec,
-                        "metadata": {
-                            "document_id": document_id,
-                            "file_name": file_name,
-                            "file_path": file_path,
-                            "chunk_index": c["index"],
-                            "chunk_hash": c["hash"],
-                            "text": meta_text,
-                            "embedding_model": self.embed_model,
-                            "timestamp": datetime.utcnow().isoformat(),
-                        },
+                        "metadata": metadata,
                     }
                 )
         return vectors
@@ -200,13 +230,14 @@ class PineconeEmbedding:
         for i in range(0, len(vectors), BATCH):
             self.index.upsert(vectors=vectors[i : i + BATCH], namespace=self.namespace)
 
-    def similarity_search(self, query: str, top_k: int = 7):
+    def similarity_search(self, query: str, top_k: int = 7, filters: Optional[Dict[str, Any]] = None):
         emb = self._embed_batch([query])[0]
         return self.index.query(
             namespace=self.namespace,
             vector=emb,
             top_k=top_k,
             include_metadata=True,
+            filter=filters or None,
         )
 
     def main(

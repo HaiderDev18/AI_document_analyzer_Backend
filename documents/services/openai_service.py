@@ -1,7 +1,7 @@
 import openai
 import logging
 import tiktoken
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -125,37 +125,34 @@ class OpenAIService:
             # """
 
             user_prompt = f"""
-            You are a helpful assistant. Answer the user's question based on the provided context.
-            For yes/no questions, give a clear 'Yes' or 'No' with a brief explanation.
-            For non-yes/no questions, provide a concise summary of the main points.
+            You are a helpful assistant. Use the provided context primarily. You may perform basic arithmetic or reasoning if the context contains the necessary numeric information. If the question requires a calculation (e.g., sum, average, ratio), compute it step-by-step.
 
             Context: {similarity_text}
             Question: {user_query}
 
-            Instructions:
-            - For yes/no questions, answer with 'Yes' or 'No' and a brief explanation.
-            - For summary questions, provide a concise summary of the key points.
-            - If there's insufficient information, state that the answer can't be provided.
-            - Focus on relevance and clarity.
+            Output format (strict):
+            - For yes/no style questions, use one line for the assessment: <Likely Yes | Likely No | Unclear>
+            - Add a second line labeled "Detail:" with a 1–3 sentence explanation in plain English.
+            - If numeric data is sufficient, include the computed result clearly in the Detail line.
+            - If numeric data is insufficient or missing, set the assessment to "Unclear" and explain what is missing under Detail.
+            - For legal questions always add a third line: Caution: This is informational only and not legal advice. Consult a qualified professional for decisions.
 
-            Example 1 (Yes/No Question):
-            - **Question**: "Is this contract valid?"
-            - **Answer**: "Yes."
+            Example:
+            Likely Yes
+            Detail: The total is 181,726.19 over 7 months, so the monthly average is 25,961.
 
-            Example 2 (Summary Question):
-            - **Question**: "What is this document about?"
-            - **Answer**: "A subcontract agreement detailing work scope, payment schedule, milestones, and responsibilities."
+            Rules:
+            - Keep Detail short and scannable; put all explanation after the label "Detail:" so users can skim.
+            - Do not include any extra sections, headers, or prose outside the allowed lines.
+            - Do not fabricate facts beyond the provided context.
             """
 
             # Send the request to the LLM client
             response = self.client.chat.completions.create(
-                model="o3",
+                model=self.model,
                 messages=[
-                    # {"role": "developer", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                # max_tokens=self.max_tokens
-                # temperature=0.7
             )
 
             # Extract the generated answer

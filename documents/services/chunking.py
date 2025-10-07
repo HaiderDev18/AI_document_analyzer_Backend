@@ -1,108 +1,187 @@
-from typing import List, Dict
-import hashlib
 import re
-
-try:
-    import tiktoken
-except ImportError:
-    tiktoken = None  # optional but recommended
+import hashlib
+from typing import List, Dict, Any
+import tiktoken
 
 
-def _normalize(text: str) -> str:
-    # cheap normalization to improve dedupe; keep punctuation for retrieval quality
-    text = text.replace("\r\n", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+def count_tokens(text: str, model: str = "cl100k_base") -> int:
+    """Count tokens in text using tiktoken."""
+    try:
+        encoding = tiktoken.get_encoding(model)
+        return len(encoding.encode(text))
+    except Exception:
+        # Fallback: rough estimate
+        return len(text.split()) * 1.3
 
 
-def _encode_len(s: str, model_name: str = "cl100k_base") -> int:
-    if tiktoken:
-        enc = tiktoken.get_encoding(model_name)
-        return len(enc.encode(s))
-    # fallback heuristic ~4 chars/token
-    return max(1, len(s) // 4)
+def is_section_header(line: str) -> bool:
+    """Check if a line is a section header like '3.0 THE SUBCONTRACT SUM'"""
+    stripped = line.strip()
+    # Matches: "3.0 TITLE", "3.1 Title", "3.0 THE TITLE"
+    return bool(re.match(r'^\d+\.\d*\s+[A-Z]', stripped))
+
+
+def extract_section_number(text: str) -> str:
+    """Extract section number from text like '3.1 Title' -> '3.1'"""
+    match = re.match(r'^(\d+\.\d*)', text.strip())
+    return match.group(1) if match else ""
 
 
 def chunk_text(
-    text: str,
-    max_tokens: int = 800,
-    overlap_tokens: int = 120,
-    token_model: str = "cl100k_base",
-) -> List[Dict]:
+        text: str,
+        max_tokens: int = 800,
+        overlap_tokens: int = 150,
+        token_model: str = "cl100k_base",
+) -> List[Dict[str, Any]]:
     """
-    Returns a list of chunks: [{ 'text': str, 'hash': str, 'index': int }]
-    Greedy packing by paragraphs with token overlap.
+    Chunk text intelligently for legal/financial documents.
+
+    Strategy:
+    1. Split by double newlines (paragraphs)
+    2. Keep section headers with their content
+    3. Ensure chunks don't exceed max_tokens
+    4. Add overlap for context continuity
     """
-    text = _normalize(text)
-    if not text:
-        return []
 
-    paras = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
-    chunks: List[Dict] = []
-    buf: List[str] = []
-    buf_tokens = 0
+    # Split into paragraphs
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
 
-    def flush():
-        nonlocal buf, buf_tokens
-        if not buf:
-            return
-        chunk_text = "\n\n".join(buf).strip()
-        h = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-        chunks.append({"text": chunk_text, "hash": h, "index": len(chunks)})
-        buf = []
-        buf_tokens = 0
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+    current_section = None
 
-    for p in paras:
-        p_tokens = _encode_len(p, token_model)
-        if p_tokens > max_tokens:
-            # hard split long paragraph into sentences (very rough)
-            sentences = re.split(r"(?<=[.!?])\s+", p)
-            cur = []
-            cur_toks = 0
-            for s in sentences:
-                st = _encode_len(s, token_model)
-                if cur_toks + st > max_tokens and cur:
-                    buf.append(" ".join(cur))
-                    flush()
-                    cur, cur_toks = [], 0
-                cur.append(s)
-                cur_toks += st
-            if cur:
-                buf.append(" ".join(cur))
-                flush()
-            continue
+    for para in paragraphs:
+        para_tokens = count_tokens(para, token_model)
 
-        if buf_tokens + p_tokens <= max_tokens:
-            buf.append(p)
-            buf_tokens += p_tokens
+        # Check if this is a section header
+        if is_section_header(para):
+            # Save previous chunk if exists
+            if current_chunk:
+                chunk_text = '\n\n'.join(current_chunk)
+                chunks.append({
+                    'text': chunk_text,
+                    'hash': hashlib.sha256(chunk_text.encode('utf-8')).hexdigest(),
+                    'index': len(chunks),
+                    'section': current_section,
+                    'tokens': current_tokens,
+                })
+
+            # Start new chunk with this header
+            current_section = extract_section_number(para) or para[:30]
+            current_chunk = [para]
+            current_tokens = para_tokens
+
         else:
-            flush()
-            buf.append(p)
-            buf_tokens = p_tokens
+            # Would adding this paragraph exceed max_tokens?
+            if current_tokens + para_tokens > max_tokens and current_chunk:
+                # Save current chunk
+                chunk_text = '\n\n'.join(current_chunk)
+                chunks.append({
+                    'text': chunk_text,
+                    'hash': hashlib.sha256(chunk_text.encode('utf-8')).hexdigest(),
+                    'index': len(chunks),
+                    'section': current_section,
+                    'tokens': current_tokens,
+                })
 
-    flush()
+                # Start new chunk with overlap
+                # Keep last paragraph(s) for context if they fit in overlap
+                overlap_content = []
+                overlap_tokens_count = 0
 
-    # Add overlap
-    if overlap_tokens > 0 and len(chunks) > 1:
-        with_overlap: List[Dict] = []
-        for i, c in enumerate(chunks):
-            if i == 0:
-                with_overlap.append(c)
-                continue
-            prev = chunks[i - 1]["text"]
-            cur = c["text"]
-            if tiktoken:
-                enc = tiktoken.get_encoding(token_model)
-                prev_tokens = enc.encode(prev)
-                keep = enc.decode(prev_tokens[-overlap_tokens:]) if prev_tokens else ""
+                for prev_para in reversed(current_chunk):
+                    prev_tokens = count_tokens(prev_para, token_model)
+                    if overlap_tokens_count + prev_tokens <= overlap_tokens:
+                        overlap_content.insert(0, prev_para)
+                        overlap_tokens_count += prev_tokens
+                    else:
+                        break
+
+                current_chunk = overlap_content + [para]
+                current_tokens = overlap_tokens_count + para_tokens
+
             else:
-                keep = prev[-overlap_tokens * 4 :]  # heuristic
-            merged = (
-                keep + ("\n\n" if keep and not keep.endswith("\n\n") else "") + cur
-            ).strip()
-            h = hashlib.sha256(merged.encode("utf-8")).hexdigest()
-            with_overlap.append({"text": merged, "hash": h, "index": i})
-        chunks = with_overlap
+                # Add to current chunk
+                current_chunk.append(para)
+                current_tokens += para_tokens
+
+    # Don't forget the last chunk!
+    if current_chunk:
+        chunk_text = '\n\n'.join(current_chunk)
+        chunks.append({
+            'text': chunk_text,
+            'hash': hashlib.sha256(chunk_text.encode('utf-8')).hexdigest(),
+            'index': len(chunks),
+            'section': current_section,
+            'tokens': current_tokens,
+        })
 
     return chunks
+
+
+def chunk_text_simple(text: str, max_chars: int = 3000) -> List[str]:
+    """
+    Simple fallback chunker by character count.
+    Used if token-based chunking fails.
+    """
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = start + max_chars
+
+        # Try to break at paragraph boundary
+        if end < len(text):
+            # Look for double newline within last 500 chars
+            search_start = max(start, end - 500)
+            para_break = text.rfind('\n\n', search_start, end)
+            if para_break > start:
+                end = para_break
+
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        start = end
+
+    return chunks
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    # Test with sample text
+    sample_text = """
+SUBCONTRACT ORDER
+
+1.0 SCOPE OF WORKS
+
+The Subcontractor shall provide all labour and materials.
+
+1.1 Including dot and dab work.
+
+2.0 PROGRAMME
+
+The works shall commence on 19/05/25.
+
+3.0 THE SUBCONTRACT SUM
+
+3.1 The Contractor shall pay to the Subcontractor the VAT exclusive sum of:
+£181,726.19
+
+One Hundred and Eighty One Thousand, Seven hundred and Twenty Six Pounds and Nineteen Pence only.
+
+3.2 This sum is deemed a fixed price.
+
+4.0 INSURANCES
+
+4.1 Public Liability Insurance required.
+"""
+
+    chunks = chunk_text(sample_text, max_tokens=300, overlap_tokens=50)
+
+    print(f"Created {len(chunks)} chunks:\n")
+    for i, chunk in enumerate(chunks):
+        print(f"--- Chunk {i} (Section: {chunk['section']}, Tokens: {chunk['tokens']}) ---")
+        print(chunk['text'][:200] + "..." if len(chunk['text']) > 200 else chunk['text'])
+        print()

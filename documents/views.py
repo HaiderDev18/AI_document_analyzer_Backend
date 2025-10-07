@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
 from .models import Document
+import logging
 from .serializers import (
     DocumentUploadSerializer,
     DocumentSerializer,
@@ -17,7 +18,7 @@ from chat.models import ChatSession
 from chat.serializers import ChatSessionSerializer
 from .services.document_processor import extract_text_from_files
 from .services.openai_service import OpenAIService
-from .services.pinecone_service import PineconeEmbedding
+from .services.pinecone_service import PineconeService
 
 
 class DocumentUploadView(generics.CreateAPIView):
@@ -99,7 +100,7 @@ class DocumentUploadView(generics.CreateAPIView):
 
             text = extract_text_from_files([tmp_path])
 
-            PineconeEmbedding(namespace=namespace).main(
+            PineconeService(namespace=namespace).engine.main(
                 text=text,
                 file_name=document.file_name,
                 file_path=f"db://{document.id}",
