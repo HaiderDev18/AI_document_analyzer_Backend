@@ -114,54 +114,71 @@ class OpenAIService:
             raise Exception(f"Failed to generate summary: {str(e)}")
 
     def generate_answer_by_llm(self, similarity_text: str, user_query: str):
-        """
-        Generate an answer using LLM with context, prioritizing yes/no answers only when appropriate,
-        and providing detailed summaries when needed.
-        Returns: (answer_text, full_response_object)
-        """
-        try:
-            # system_prompt = """
-
-            # """
-
-            user_prompt = f"""
-            You are a helpful assistant. Use the provided context primarily. You may perform basic arithmetic or reasoning if the context contains the necessary numeric information. If the question requires a calculation (e.g., sum, average, ratio), compute it step-by-step.
-
-            Context: {similarity_text}
-            Question: {user_query}
-
-            Output format (strict):
-            - For yes/no style questions, use one line for the assessment: <Likely Yes | Likely No | Unclear>
-            - Add a second line labeled "Detail:" with a 1–3 sentence explanation in plain English.
-            - If numeric data is sufficient, include the computed result clearly in the Detail line.
-            - If numeric data is insufficient or missing, set the assessment to "Unclear" and explain what is missing under Detail.
-            - For legal questions always add a third line: Caution: This is informational only and not legal advice. Consult a qualified professional for decisions.
-
-            Example:
-            Likely Yes
-            Detail: The total is 181,726.19 over 7 months, so the monthly average is 25,961.
-
-            Rules:
-            - Keep Detail short and scannable; put all explanation after the label "Detail:" so users can skim.
-            - Do not include any extra sections, headers, or prose outside the allowed lines.
-            - Do not fabricate facts beyond the provided context.
             """
+            Generate an answer using LLM with context, adapting format based on question type.
+            Returns: (answer_text, full_response_object)
+            """
+            try:
+                user_prompt = f"""
+        You are a helpful assistant. Use the provided context to answer questions accurately. You may perform basic arithmetic or reasoning if the context contains the necessary numeric information.
 
-            # Send the request to the LLM client
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ],
-            )
+        Context: {similarity_text}
+        Question: {user_query}
 
-            # Extract the generated answer
-            answer = response.choices[0].message.content.strip()
-            return answer, response
+        Instructions:
+        1. First, determine the question type:
+        - YES/NO questions: Questions asking if/whether something is true, exists, or is allowed (e.g., "Is X required?", "Does the contract allow Y?")
+        - FACTUAL questions: Questions asking for specific information, values, definitions, or explanations (e.g., "What is X?", "Find Y", "How much is Z?")
+        - CALCULATION questions: Questions requiring computation from context data
 
-        except Exception as e:
-            logger.error(f"Error generating LLM answer: {str(e)}")
-            raise Exception(f"Failed to generate LLM answer: {str(e)}")
+        2. Format your response based on question type:
+
+        For YES/NO questions:
+        Assessment: <Likely Yes | Likely No | Unclear>
+        Detail: [1-3 sentence explanation]
+        
+        For FACTUAL or CALCULATION questions:
+        Answer: [Direct answer with specific value/information]
+        Detail: [1-3 sentence explanation with source reference]
+
+        3. Rules:
+        - For factual questions, provide the direct answer (number, text, definition) immediately after "Answer:"
+        - For calculations, show the result clearly and explain the computation briefly
+        - If information is missing or insufficient, use "Unclear" for yes/no or "Information not found" for factual questions
+        - Keep explanations concise and scannable
+        - Always cite the relevant clause/section from context when possible
+        - For legal/contractual questions, add: "Caution: This is informational only and not legal advice. Consult a qualified professional for decisions."
+
+        Example 1 (Factual):
+        Answer: 5%
+        Detail: Clause 6.1 states, "The Retention Percentage applicable to this Subcontract is 5%."
+        Caution: This is informational only and not legal advice. Consult a qualified professional for decisions.
+
+        Example 2 (Yes/No):
+        Assessment: Likely Yes
+        Detail: Clause 8.2 explicitly states that the contractor must provide insurance, indicating this is a requirement.
+        Caution: This is informational only and not legal advice. Consult a qualified professional for decisions.
+
+        Example 3 (Calculation):
+        Answer: 25,961 (monthly average)
+        Detail: The total is 181,726.19 over 7 months, calculated as 181,726.19 ÷ 7 = 25,961.
+        """
+
+                # Send the request to the LLM client
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "user", "content": user_prompt}
+                    ],
+                )
+
+                # Extract the generated answer
+                answer = response.choices[0].message.content.strip()
+                return answer, response
+
+            except Exception as e:
+                logger.error(f"Error generating LLM answer: {str(e)}")
+                raise Exception(f"Failed to generate LLM answer: {str(e)}")
 
     def generate_risk_factors(self, text: str):
         """
