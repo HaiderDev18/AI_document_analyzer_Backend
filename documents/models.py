@@ -62,6 +62,10 @@ class Document(models.Model):
     summary = models.TextField(blank=True)
     risk_factors = models.JSONField(default=dict, blank=True)
 
+    # Hybrid RAG: Store full text for small documents
+    processing_mode = models.CharField(max_length=20, blank=True, default='')
+    full_text = models.TextField(blank=True)
+
     # Timestamps & soft delete
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

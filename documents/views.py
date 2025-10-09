@@ -19,6 +19,9 @@ from chat.serializers import ChatSessionSerializer
 from .services.document_processor import extract_text_from_files
 from .services.openai_service import OpenAIService
 from .services.pinecone_service import PineconeService
+from .services.enhanced_pinecone_service import EnhancedPineconeService
+from .services.hybrid_rag_service import HybridRAGService
+from django.conf import settings
 
 
 class DocumentUploadView(generics.CreateAPIView):
@@ -98,18 +101,93 @@ class DocumentUploadView(generics.CreateAPIView):
             with os.fdopen(fd, "wb") as tmp:
                 tmp.write(asset.blob)
 
-            text = extract_text_from_files([tmp_path])
+            # Check if we should use enhanced RAG
+            use_enhanced_rag = getattr(settings, 'USE_ENHANCED_RAG', False)
 
-            PineconeService(namespace=namespace).engine.main(
-                text=text,
-                file_name=document.file_name,
-                file_path=f"db://{document.id}",
-                user=document.user,
-            )
+            if use_enhanced_rag:
+                # Extract text with tables
+                text_with_tables, table_metadata = extract_text_from_files(
+                    [tmp_path],
+                    extract_tables=True
+                )
+
+                # Initialize hybrid RAG service
+                hybrid_service = HybridRAGService()
+                mode_info = hybrid_service.get_processing_mode(text_with_tables)
+
+                print(f"\n{'='*60}")
+                print(f"[HYBRID RAG - {mode_info['mode'].upper()}] Document: {document.file_name}")
+                print(f"  - Text length: {len(text_with_tables):,} chars (~{mode_info['estimated_tokens']:,} tokens)")
+                print(f"  - Has tables: {table_metadata.get('has_tables', False)}")
+                print(f"  - Table count: {table_metadata.get('table_count', 0)}")
+                print(f"  - Processing mode: {mode_info['mode']}")
+                print(f"  - Reason: {mode_info['reason']}")
+
+                if mode_info['mode'] == 'full_context':
+                    # SMALL DOCUMENT: Store full text in DATABASE (persistent across restarts)
+                    print(f"  - Storing full context in database (no embeddings needed)")
+
+                    # Store in database for persistence
+                    document.processing_mode = 'full_context'
+                    document.full_text = text_with_tables
+                    document.save(update_fields=['processing_mode', 'full_text', 'updated_at'])
+
+                    # Also store in cache for fast retrieval (optional performance boost)
+                    hybrid_service.store_full_context(
+                        session_id=str(document.session.id),
+                        document_id=str(document.id),
+                        text=text_with_tables,
+                        metadata=table_metadata
+                    )
+
+                    print(f"  - ✅ Full context stored in DB (persists across server restarts)")
+
+                else:
+                    # LARGE DOCUMENT: Use embeddings as usual
+                    print(f"  - Using embedding-based retrieval")
+
+                    # Mark processing mode
+                    document.processing_mode = 'embeddings'
+                    document.save(update_fields=['processing_mode', 'updated_at'])
+
+                    # Use enhanced Pinecone service with semantic enrichment
+                    service = EnhancedPineconeService(
+                        namespace=namespace,
+                        use_semantic_enrichment=True
+                    )
+
+                    result = service.store_text_with_semantics(
+                        document_id=str(document.id),
+                        text=text_with_tables,
+                        file_name=document.file_name,
+                        file_path=f"db://{document.id}",
+                        use_llm_enrichment=False
+                    )
+
+                    print(f"  - Chunks created: {result.get('chunks_processed', 0)}")
+                    print(f"  - Vectors upserted: {result.get('upserted', 0)}")
+                    print(f"  - Semantic enrichment: {result.get('semantic_enrichment', False)}")
+
+                print(f"{'='*60}\n")
+
+            else:
+                # OLD: Use original system (backward compatible)
+                text = extract_text_from_files([tmp_path], extract_tables=False)
+
+                print(f"\n[Document Processing - CLASSIC] Document: {document.file_name}")
+                print(f"  - Text length: {len(text)} chars")
+
+                PineconeService(namespace=namespace).engine.main(
+                    text=text,
+                    file_name=document.file_name,
+                    file_path=f"db://{document.id}",
+                    user=document.user,
+                )
 
             document.status = Document.STATUS_COMPLETED
             document.save(update_fields=["status", "updated_at"])
         except Exception as e:
+            print(f"[Document Processing Error] {str(e)}")
             document.status = Document.STATUS_FAILED
             document.processing_error = str(e)
             document.save(update_fields=["status", "processing_error", "updated_at"])
@@ -141,7 +219,13 @@ class DocumentSummaryView(APIView):
         try:
             with os.fdopen(fd, "wb") as tmp:
                 tmp.write(asset.blob)
-            text = extract_text_from_files([tmp_path])
+
+            # Use same settings as document upload
+            use_enhanced_rag = getattr(settings, 'USE_ENHANCED_RAG', False)
+            if use_enhanced_rag:
+                text_with_tables, _ = extract_text_from_files([tmp_path], extract_tables=True)
+            else:
+                text_with_tables = extract_text_from_files([tmp_path], extract_tables=False)
         finally:
             if os.path.exists(tmp_path):
                 try:
@@ -149,7 +233,7 @@ class DocumentSummaryView(APIView):
                 except Exception:
                     pass
 
-        summary, _ = OpenAIService().generate_summary(text)
+        summary, _ = OpenAIService().generate_summary(text_with_tables)
         doc.summary = summary or ""
         doc.save(update_fields=["summary", "updated_at"])
         return Response(

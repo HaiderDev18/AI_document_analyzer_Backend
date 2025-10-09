@@ -75,12 +75,21 @@ def _clean_text(text: str) -> str:
     return "\n".join(cleaned_lines).strip()
 
 
-def extract_text_from_files(file_paths, result_type="text"):
+def extract_text_from_files(file_paths, result_type="text", extract_tables=True):
     """
     Extract text with BETTER structure preservation for legal/financial docs.
+    Now includes table extraction with checkbox detection.
+
+    Args:
+        file_paths: List of file paths to process
+        result_type: Type of result for LlamaParse
+        extract_tables: If True, extract and merge tables with text
+
+    Returns:
+        Tuple of (text, table_metadata) if extract_tables=True, else just text
     """
     if not file_paths:
-        return ""
+        return ("", {}) if extract_tables else ""
 
     file_path = file_paths[0]
     _, ext = os.path.splitext(file_path.lower())
@@ -104,14 +113,30 @@ def extract_text_from_files(file_paths, result_type="text"):
 
         if text_blocks:
             raw_text = "\n\n".join(text_blocks)
-            return _clean_text(raw_text)
+            cleaned_text = _clean_text(raw_text)
+
+            # Extract and merge tables if requested
+            if extract_tables:
+                try:
+                    from documents.services.table_extractor import extract_and_merge_tables_with_text
+                    merged_text, table_metadata = extract_and_merge_tables_with_text(file_path, cleaned_text)
+                    return merged_text, table_metadata
+                except Exception as e:
+                    print(f"Table extraction failed: {e}")
+                    return cleaned_text, {'has_tables': False}
+            else:
+                return cleaned_text  # Return just text if extract_tables=False
 
     # Fallback: LlamaParse
     parser = LlamaParse(result_type=result_type, auto_mode=True)
     result = parser.parse(file_path)
     text_documents = result.get_text_documents(split_by_page=False)
     text = "\n\n".join([doc.text for doc in text_documents])
-    return _clean_text(text)
+    cleaned_text = _clean_text(text)
+
+    if extract_tables:
+        return cleaned_text, {'has_tables': False}
+    return cleaned_text
 
 
 class DocumentProcessor:

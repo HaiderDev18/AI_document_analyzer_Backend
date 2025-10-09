@@ -9,8 +9,11 @@ from .serializers import (
     ChatMessageSerializer,
     OnlyChatSessionSerializer,
 )
+from documents.services.enhanced_pinecone_service import EnhancedPineconeService
 from documents.services.pinecone_service import PineconeEmbedding
 from documents.services.openai_service import OpenAIService
+from documents.services.hybrid_rag_service import HybridRAGService, format_full_context_prompt
+from django.conf import settings
 
 
 class ChatSessionListView(generics.ListAPIView):
@@ -188,7 +191,7 @@ class ChatView(generics.CreateAPIView):
             )
 
         openai_service = OpenAIService()
-        pinecone_embedding = PineconeEmbedding(namespace=session.namespace)
+
         try:
             top_k = int(request.data.get("top_k", 10))
         except Exception:
@@ -197,6 +200,7 @@ class ChatView(generics.CreateAPIView):
         if top_k < 12:
             top_k = 12
         debug_raw = str(request.data.get("debug", "false")).lower() == "true"
+
         # Proceed with saving the message and generating the AI response
         user_message = ChatMessage.objects.create(
             session=session,
@@ -205,143 +209,142 @@ class ChatView(generics.CreateAPIView):
             token_count=openai_service.count_tokens(message),
         )
 
-        ai_response = "AI response to message..." 
+        ai_response = "AI response to message..."
+
+        # Check if enhanced RAG is enabled
+        use_enhanced_rag = getattr(settings, 'USE_ENHANCED_RAG', False)
 
         try:
-            # Search for relevant context in user's documents
-            # Primary semantic search
-            search_results = pinecone_embedding.similarity_search(message, top_k=top_k)
+            # HYBRID RAG: Check if session has full-context documents
+            hybrid_service = HybridRAGService()
+            full_context = hybrid_service.get_all_session_context(str(session.id))
 
-            matches = []
-            raw_primary = []
-            if isinstance(search_results, dict):
-                matches = search_results.get("matches", [])
+            # If cache is empty, check database for full_context mode documents
+            if use_enhanced_rag and not full_context:
+                full_context_docs = session.documents.filter(
+                    processing_mode='full_context',
+                    status='completed'
+                ).values_list('full_text', flat=True)
+
+                if full_context_docs:
+                    full_context = "\n\n" + "="*80 + "\n\n".join(full_context_docs)
+                    print(f"[HYBRID RAG] Loaded full context from database (cache was empty)")
+
+            if use_enhanced_rag and full_context:
+                # FULL CONTEXT MODE: Small document(s), send entire text as context
+                print(f"\n{'='*60}")
+                print(f"[FULL CONTEXT MODE] Session: {session.id}")
+                print(f"  - Using complete document text as context")
+                print(f"  - Context length: {len(full_context):,} chars")
+                print(f"  - Query: {message}")
+                print(f"{'='*60}\n")
+
+                # Format prompt with full context
+                messages = format_full_context_prompt(full_context, message)
+
+                # Get response directly
+                llm_response, openai_response = openai_service.client.chat.completions.create(
+                    model=openai_service.model,
+                    messages=messages
+                ), None
+
+                # Extract content
+                if hasattr(llm_response, 'choices'):
+                    llm_response = llm_response.choices[0].message.content.strip()
+
+                # Create retrieval info for response
+                retrieval = [{
+                    "mode": "full_context",
+                    "context_length": len(full_context),
+                    "note": "Entire document sent as context (no embedding search needed)"
+                }]
+
+                norm_matches = []  # No matches needed
+
+            elif use_enhanced_rag:
+                # NEW: Use smart retrieval with automatic filtering
+                print(f"\n{'='*60}")
+                print(f"[SMART RETRIEVAL - ENHANCED] Session: {session.id}")
+                print(f"[SMART RETRIEVAL] Query: {message}")
+                print(f"[SMART RETRIEVAL] Top K: {top_k}")
+                print(f"{'='*60}\n")
+
+                pinecone_service = EnhancedPineconeService(
+                    namespace=session.namespace,
+                    use_semantic_enrichment=True
+                )
+
+                # Smart retrieval automatically detects query intent and applies filters
+                norm_matches = pinecone_service.smart_retrieval(
+                    query=message,
+                    top_k=top_k,
+                    auto_filter=True
+                )
+
+                # Print debug info
+                print(f"[SMART RETRIEVAL] Retrieved {len(norm_matches)} matches")
+                if debug_raw and norm_matches:
+                    for i, m in enumerate(norm_matches[:5]):
+                        md = m.get("metadata", {})
+                        print(f"  [{i+1}] Score: {m.get('score', 0):.3f}")
+                        print(f"      Content Types: {md.get('content_types', [])}")
+                        print(f"      Has Amounts: {md.get('has_amounts', False)}")
+                        print(f"      Section: {md.get('section', 'N/A')}")
+                        print(f"      Text: {md.get('text', '')[:150]}...")
+                        print()
             else:
-                matches = getattr(search_results, "matches", []) or []
-            # capture raw primary
-            try:
+                # OLD: Use classic retrieval (backward compatible)
+                print(f"\n[RETRIEVAL - CLASSIC] Session: {session.id}, Query: {message}, Top K: {top_k}")
+
+                pinecone_embedding = PineconeEmbedding(namespace=session.namespace)
+                search_results = pinecone_embedding.similarity_search(message, top_k=top_k)
+
+                # Normalize matches
+                matches = []
+                if isinstance(search_results, dict):
+                    matches = search_results.get("matches", [])
+                else:
+                    matches = getattr(search_results, "matches", []) or []
+
+                # Convert to dict format
+                norm_matches = []
                 for m in matches:
-                    raw_primary.append(
-                        {
-                            "id": getattr(m, "id", None) or m.get("id"),
-                            "score": getattr(m, "score", None) or m.get("score"),
-                            "metadata": getattr(m, "metadata", None)
-                            or m.get("metadata", {}),
-                        }
-                    )
-            except Exception:
-                pass
-            debug_raw = True
-            if debug_raw:
-                try:
-                    print("[RAG] Primary retrieval:")
-                    print(f"  session={session.id} top_k={top_k} message={message!r}")
-                    print(f"  primary_matches={len(raw_primary)}")
-                    for i, r in enumerate(raw_primary[:10]):
-                        md = r.get("metadata", {}) or {}
-                        snippet = md.get("text") or ""
-                        snippet = (snippet[:200] + "…") if len(snippet) > 200 else snippet
-                        print(
-                            f"    [{i}] id={r.get('id')} score={r.get('score')} section={md.get('section_label')} doc={md.get('document_id')} idx={md.get('chunk_index')}\n      {snippet}"
-                        )
-                except Exception:
-                    pass
+                    norm_matches.append({
+                        "id": getattr(m, "id", None) or m.get("id"),
+                        "score": getattr(m, "score", None) or m.get("score"),
+                        "metadata": getattr(m, "metadata", None) or m.get("metadata", {})
+                    })
 
-            # Keyword-triggered secondary searches (hybrid-ish retrieval)
-            import re as _re
-            secondary_terms = []
-            if _re.search(r"sum|amount|payment|pay|price|total|completion|cost|value", message, _re.I):
-                secondary_terms.extend([
-                    "Subcontract sum",
-                    "Subcontract sum amount",
-                    "total subcontract value",
-                    "contractor shall pay",
-                    "VAT exclusive sum",
-                ])
-            if _re.search(r"retention|holdback|withhold|percentage", message, _re.I):
-                secondary_terms.append("Retention percentage")
+                print(f"[RETRIEVAL] Retrieved {len(norm_matches)} matches")
 
-            raw_secondary = []
-            for term in secondary_terms:
-                try:
-                    extra_res = pinecone_embedding.similarity_search(term, top_k=5)
-                    extra_matches = (
-                        extra_res.get("matches", [])
-                        if isinstance(extra_res, dict)
-                        else getattr(extra_res, "matches", []) or []
-                    )
-                    matches.extend(extra_matches)
-                    # capture raw secondary
+
+            # Build context from matches (only if not using full context mode)
+            if not full_context:
+                context_texts = []
+                if 'retrieval' not in locals():
+                    retrieval = []
+
+                for m in norm_matches:
+                    md = m.get("metadata", {})
+                    t = md.get("text")
+                    if t:
+                        context_texts.append(t)
+                    # diagnostics record
                     try:
-                        for m in extra_matches:
-                            raw_secondary.append(
-                                {
-                                    "id": getattr(m, "id", None) or m.get("id"),
-                                    "score": getattr(m, "score", None)
-                                    or m.get("score"),
-                                    "metadata": getattr(m, "metadata", None)
-                                    or m.get("metadata", {}),
-                                    "term": term,
-                                }
-                            )
+                        retrieval.append(
+                            {
+                                "score": m.get("score"),
+                                "document_id": md.get("document_id"),
+                                "chunk_index": md.get("chunk_index"),
+                                "section_label": md.get("section_label"),
+                                "snippet": (t[:200] + "…") if t and len(t) > 200 else t,
+                            }
+                        )
                     except Exception:
                         pass
-                except Exception:
-                    pass
-
-            if debug_raw and secondary_terms:
-                try:
-                    print("[RAG] Secondary retrieval:")
-                    print(f"  terms={secondary_terms} secondary_matches={len(raw_secondary)}")
-                    for i, r in enumerate(raw_secondary[:10]):
-                        md = r.get("metadata", {}) or {}
-                        snippet = md.get("text") or ""
-                        snippet = (snippet[:200] + "…") if len(snippet) > 200 else snippet
-                        print(
-                            f"    [{i}] term={r.get('term')} id={r.get('id')} score={r.get('score')} section={md.get('section_label')} doc={md.get('document_id')} idx={md.get('chunk_index')}\n      {snippet}"
-                        )
-                except Exception:
-                    pass
-
-            # Deduplicate by vector id while keeping best score
-            dedup = {}
-            norm_matches = []
-            for m in matches:
-                # normalize obj/dict interface
-                mid = getattr(m, "id", None) or m.get("id")
-                mscore = getattr(m, "score", None) or m.get("score")
-                mmd = getattr(m, "metadata", None) or m.get("metadata", {})
-                if not mid:
-                    continue
-                if mid not in dedup or (mscore is not None and (dedup[mid]["score"] or 0) < mscore):
-                    dedup[mid] = {"id": mid, "score": mscore, "metadata": mmd}
-            for v in dedup.values():
-                norm_matches.append(v)
-            # sort by score desc
-            norm_matches.sort(key=lambda x: (x["score"] is not None, x["score"]), reverse=True)
-            print("norm_matches", len(norm_matches))
-
-
-            context_texts = []
-            retrieval = []
-            for m in norm_matches:
-                md = m.get("metadata", {})
-                t = md.get("text")
-                if t:
-                    context_texts.append(t)
-                # diagnostics record
-                try:
-                    retrieval.append(
-                        {
-                            "score": m.get("score"),
-                            "document_id": md.get("document_id"),
-                            "chunk_index": md.get("chunk_index"),
-                            "section_label": md.get("section_label"),
-                            "snippet": (t[:200] + "…") if t and len(t) > 200 else t,
-                        }
-                    )
-                except Exception:
-                    pass
+            else:
+                # Full context mode - context already used
+                context_texts = []
 
             # When debug is enabled, print unique texts retrieved (deduped by content hash)
             if debug_raw:
@@ -380,41 +383,43 @@ class ChatView(generics.CreateAPIView):
 
             try:
                 print(
-                    f"[RAG] Summary: session={session.id} msg_len={len(message)} matches_total={len(matches)} unique={len(norm_matches)}"
+                    f"[RAG] Summary: session={session.id} msg_len={len(message)} unique={len(norm_matches)}"
                 )
             except Exception:
                 pass
 
-            # Generate response using context
-            if context_texts:
-                context_text = "\n".join(context_texts)
-                if debug_raw:
+            # Generate response using context (skip if already done in full context mode)
+            if not full_context:
+                if context_texts:
+                    context_text = "\n".join(context_texts)
+                    if debug_raw:
+                        try:
+                            print("[RAG] Context passed to LLM:")
+                            print(f"  total_chars={len(context_text)} total_chunks={len(context_texts)}")
+                            head = context_text[:400]
+                            tail = context_text[-400:] if len(context_text) > 400 else ""
+                            print("  --- BEGIN CONTEXT HEAD ---\n" + head + "\n  --- END CONTEXT HEAD ---")
+                            if tail:
+                                print("  --- BEGIN CONTEXT TAIL ---\n" + tail + "\n  --- END CONTEXT TAIL ---")
+                        except Exception:
+                            pass
+                    llm_response, openai_response = openai_service.generate_answer_by_llm(
+                        similarity_text=context_text, user_query=message
+                    )
+                else:
+                    # Log when no relevant context found
                     try:
-                        print("[RAG] Context passed to LLM:")
-                        print(f"  total_chars={len(context_text)} total_chunks={len(context_texts)}")
-                        head = context_text[:400]
-                        tail = context_text[-400:] if len(context_text) > 400 else ""
-                        print("  --- BEGIN CONTEXT HEAD ---\n" + head + "\n  --- END CONTEXT HEAD ---")
-                        if tail:
-                            print("  --- BEGIN CONTEXT TAIL ---\n" + tail + "\n  --- END CONTEXT TAIL ---")
+                        print(
+                            f"[RAG] No relevant context found for session={session.id}; sending fallback context."
+                        )
                     except Exception:
                         pass
-                llm_response, openai_response = openai_service.generate_answer_by_llm(
-                    similarity_text=context_text, user_query=message
-                )
-            else:
-                # Log when no relevant context found
-                try:
-                    print(
-                        f"[RAG] No relevant context found for session={session.id}; sending fallback context."
+                    # No relevant context found, generate general response
+                    llm_response, openai_response = openai_service.generate_answer_by_llm(
+                        similarity_text="No relevant document context found.",
+                        user_query=message,
                     )
-                except Exception:
-                    pass
-                # No relevant context found, generate general response
-                llm_response, openai_response = openai_service.generate_answer_by_llm(
-                    similarity_text="No relevant document context found.",
-                    user_query=message,
-                )
+            # else: llm_response already set in full context mode
 
             # Track chat usage for analytics
             # if openai_response:
@@ -443,20 +448,27 @@ class ChatView(generics.CreateAPIView):
             "assistant_message": ChatMessageSerializer(assistant_message).data,
             "retrieval": {
                 "namespace": session.namespace,
-                "top_k": top_k,
+                "mode": "full_context" if full_context else "embeddings",
+                "top_k": top_k if not full_context else None,
                 "matches": retrieval,
+                "smart_retrieval_enabled": True,
             },
         }
         if debug_raw:
-            # include raw pinecone results and the exact context text used
+            # include context text and enhanced metadata
             try:
-                resp_payload["similarity_text"] = context_text if context_texts else None
+                if full_context:
+                    resp_payload["full_context_length"] = len(full_context)
+                else:
+                    resp_payload["similarity_text"] = context_text if context_texts else None
             except Exception:
                 resp_payload["similarity_text"] = None
-            resp_payload["raw_similarity"] = {
-                "primary": raw_primary,
-                "secondary": raw_secondary,
-            }
+
+            if not full_context:
+                resp_payload["enhanced_metadata"] = {
+                    "total_matches": len(norm_matches),
+                    "matches_with_semantic": sum(1 for m in norm_matches if m.get("metadata", {}).get("content_types")),
+                }
 
         return Response(
             resp_payload,

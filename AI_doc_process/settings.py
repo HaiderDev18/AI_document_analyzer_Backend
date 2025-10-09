@@ -286,6 +286,9 @@ CHUNK_OVERLAP = config("CHUNK_OVERLAP", default=200, cast=int)
 
 LLAMA_CLOUD_API_KEY = config("LLAMA_CLOUD_API_KEY", default="")
 
+USE_ENHANCED_RAG = config("USE_ENHANCED_RAG", default=False, cast=bool)
+FULL_CONTEXT_CHAR_LIMIT = config("FULL_CONTEXT_CHAR_LIMIT", default=100000, cast=int)  # 100k chars (~25k tokens)
+
 # Security Settings
 if not DEBUG:
     SECURE_BROWSER_XSS_FILTER = True
