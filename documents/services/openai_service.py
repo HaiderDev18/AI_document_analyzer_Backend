@@ -114,71 +114,72 @@ class OpenAIService:
             raise Exception(f"Failed to generate summary: {str(e)}")
 
     def generate_answer_by_llm(self, similarity_text: str, user_query: str):
-            """
-            Generate an answer using LLM with context, adapting format based on question type.
-            Returns: (answer_text, full_response_object)
-            """
-            try:
-                user_prompt = f"""
-        You are a helpful assistant. Use the provided context to answer questions accurately. You may perform basic arithmetic or reasoning if the context contains the necessary numeric information.
-
-        Context: {similarity_text}
-        Question: {user_query}
-
-        Instructions:
-        1. First, determine the question type:
-        - YES/NO questions: Questions asking if/whether something is true, exists, or is allowed (e.g., "Is X required?", "Does the contract allow Y?")
-        - FACTUAL questions: Questions asking for specific information, values, definitions, or explanations (e.g., "What is X?", "Find Y", "How much is Z?")
-        - CALCULATION questions: Questions requiring computation from context data
-
-        2. Format your response based on question type:
-
-        For YES/NO questions:
-        Assessment: <Likely Yes | Likely No | Unclear>
-        Detail: [1-3 sentence explanation]
-        
-        For FACTUAL or CALCULATION questions:
-        Answer: [Direct answer with specific value/information]
-        Detail: [1-3 sentence explanation with source reference]
-
-        3. Rules:
-        - For factual questions, provide the direct answer (number, text, definition) immediately after "Answer:"
-        - For calculations, show the result clearly and explain the computation briefly
-        - If information is missing or insufficient, use "Unclear" for yes/no or "Information not found" for factual questions
-        - Keep explanations concise and scannable
-        - Always cite the relevant clause/section from context when possible
-        - For legal/contractual questions, add: "Caution: This is informational only and not legal advice. Consult a qualified professional for decisions."
-
-        Example 1 (Factual):
-        Answer: 5%
-        Detail: Clause 6.1 states, "The Retention Percentage applicable to this Subcontract is 5%."
-        Caution: This is informational only and not legal advice. Consult a qualified professional for decisions.
-
-        Example 2 (Yes/No):
-        Assessment: Likely Yes
-        Detail: Clause 8.2 explicitly states that the contractor must provide insurance, indicating this is a requirement.
-        Caution: This is informational only and not legal advice. Consult a qualified professional for decisions.
-
-        Example 3 (Calculation):
-        Answer: 25,961 (monthly average)
-        Detail: The total is 181,726.19 over 7 months, calculated as 181,726.19 ÷ 7 = 25,961.
         """
+        Generate an answer using LLM with context, adapting format based on question type.
+        Returns: (answer_text, full_response_object)
+        """
+        try:
+            user_prompt = f"""
+                You are an expert AI legal counsel assistant. Your job is to ANSWER THE USER'S ACTUAL QUESTION, not just report what's explicitly written.
+            
+                **Core Principle:**
+                Most legal and contractual questions require INTERPRETATION and ANALYSIS, not just text extraction. Apply your domain expertise to provide practical, useful answers.
+            
+                **Context:**
+                {similarity_text}
+            
+                **Question:**
+                {user_query}
+            
+                **How to Answer:**
+            
+                1. **Understand what the user is really asking**
+                   - "What documents overrule others?" → They want the precedence hierarchy
+                   - "Who is liable for X?" → They want to know responsibility allocation
+                   - "When does Y happen?" → They want the trigger/timeline/condition
+                   - "Can we do Z?" → They want to know rights and limitations
+            
+                2. **Provide a complete answer by:**
+                   - Citing explicit clauses where they exist
+                   - Analyzing document structure, cross-references, and relationships
+                   - Applying standard legal interpretation principles (specificity, hierarchy, context)
+                   - Using domain knowledge of typical contractual frameworks and industry practices
+                   - Making reasonable inferences from the document's structure and content
+            
+                3. **Structure your response:**
+                   - Give the substantive answer first (don't default to "not specified")
+                   - Explain your reasoning clearly
+                   - Cite sources when available
+                   - When interpreting, note: "⚠️ Based on [document structure/standard legal principles/industry practice] as this is not explicitly stated. This is informational guidance, not formal legal advice."
+            
+                4. **ONLY say "Information not found" if:**
+                   - The question asks for a specific fact (date, amount, name, address) that genuinely isn't in the document
+                   - No reasonable interpretation, standard practice, or industry norm applies
+                   - You cannot make a defensible inference from the available information
+            
+                **Response Format:**
+            
+                For YES/NO: Assessment (Likely Yes/No/Unclear) + detailed reasoning
+                For FACTUAL: Direct answer + explanation and sources
+                For HIERARCHY/PRECEDENCE/RELATIONSHIPS: Structured explanation of how elements relate
+                For CALCULATION: Result + methodology and references
+                For PROCESS/PROCEDURE: Step-by-step explanation with relevant clauses
+            
+                **Remember:** Users need actionable guidance. Use the document content, its structure, standard legal interpretation principles, and domain knowledge to provide helpful answers. Be an intelligent analyst, not just a text search tool.
+                """
 
-                # Send the request to the LLM client
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "user", "content": user_prompt}
-                    ],
-                )
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": user_prompt}],
+                temperature=0.7,
+            )
 
-                # Extract the generated answer
-                answer = response.choices[0].message.content.strip()
-                return answer, response
+            answer = response.choices[0].message.content.strip()
+            return answer, response
 
-            except Exception as e:
-                logger.error(f"Error generating LLM answer: {str(e)}")
-                raise Exception(f"Failed to generate LLM answer: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error generating LLM answer: {str(e)}")
+            raise Exception(f"Failed to generate LLM answer: {str(e)}")
 
     def generate_risk_factors(self, text: str):
         """

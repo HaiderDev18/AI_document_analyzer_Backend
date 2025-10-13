@@ -105,19 +105,18 @@ WSGI_APPLICATION = "AI_doc_process.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": config("POSTGRES_DB", default="postgres_doc"),
-        "USER": config("POSTGRES_USER", default="powerfuluser"),
-        "PASSWORD": config("POSTGRES_PASSWORD", default="powerfulpassword"),
-        "HOST": config("POSTGRES_HOST", default="127.0.0.1"),
-        "PORT": config("POSTGRES_PORT", default="5432"),
+        "NAME": config("POSTGRES_DB", default="defaultdb"),
+        "USER": config("POSTGRES_USER", default="doadmin"),
+        "PASSWORD": config("POSTGRES_PASSWORD", default=""),
+        "HOST": config("POSTGRES_HOST", default=""),
+        "PORT": config("POSTGRES_PORT", default="25060"),
         "OPTIONS": {
+            "sslmode": config("POSTGRES_SSLMODE", default="require"),
             "application_name": "ai_doc_process"
         },
         "CONN_MAX_AGE": 600,
     }
 }
-DATABASES["default"].setdefault("OPTIONS", {})
-DATABASES["default"]["OPTIONS"]["application_name"] = "ai_doc_process"
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
