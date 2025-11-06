@@ -168,7 +168,8 @@ def format_full_context_prompt(text: str, query: str) -> list:
     Returns:
         List of messages for OpenAI API
     """
-    system_prompt = """You are a helpful assistant that answers questions based on the provided document.
+    system_prompt = """
+    You are a helpful assistant that answers questions based on the provided document.
 
 Rules:
 - Answer based ONLY on the information in the document
