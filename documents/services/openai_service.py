@@ -113,64 +113,139 @@ class OpenAIService:
             logger.error(f"Error generating summary: {str(e)}")
             raise Exception(f"Failed to generate summary: {str(e)}")
 
-    def generate_answer_by_llm(self, similarity_text: str, user_query: str):
+    def generate_answer_by_llm(self, similarity_text: str, user_query: str, history: list = None):
         """
         Generate an answer using LLM with context, adapting format based on question type.
         Returns: (answer_text, full_response_object)
         """
         try:
             user_prompt = f"""
-                You are an expert AI legal counsel assistant. Your job is to ANSWER THE USER'S ACTUAL QUESTION, not just report what's explicitly written.
-            
+                You are an expert AI legal counsel assistant. Your job is to ANSWER THE USER'S ACTUAL QUESTION through both explicit text analysis and intelligent interpretation of implicit meanings.
+
                 **Core Principle:**
-                Most legal and contractual questions require INTERPRETATION and ANALYSIS, not just text extraction. Apply your domain expertise to provide practical, useful answers.
-            
+                Legal and contractual questions require INTERPRETATION at multiple levels:
+                - Explicit: What is directly stated
+                - Implicit: What is logically implied or follows from stated terms
+                - Structural: What the document's organization and relationships reveal
+                - Contextual: What standard practices and legal principles suggest
+
                 **Context:**
                 {similarity_text}
-            
+
                 **Question:**
                 {user_query}
-            
+
                 **How to Answer:**
-            
+
                 1. **Understand what the user is really asking**
                    - "What documents overrule others?" → They want the precedence hierarchy
                    - "Who is liable for X?" → They want to know responsibility allocation
                    - "When does Y happen?" → They want the trigger/timeline/condition
                    - "Can we do Z?" → They want to know rights and limitations
-            
-                2. **Provide a complete answer by:**
-                   - Citing explicit clauses where they exist
-                   - Analyzing document structure, cross-references, and relationships
-                   - Applying standard legal interpretation principles (specificity, hierarchy, context)
-                   - Using domain knowledge of typical contractual frameworks and industry practices
-                   - Making reasonable inferences from the document's structure and content
-            
-                3. **Structure your response:**
-                   - Give the substantive answer first (don't default to "not specified")
-                   - Explain your reasoning clearly
-                   - Cite sources when available
-                   - When interpreting, note: "⚠️ Based on [document structure/standard legal principles/industry practice] as this is not explicitly stated. This is informational guidance, not formal legal advice."
-            
-                4. **ONLY say "Information not found" if:**
-                   - The question asks for a specific fact (date, amount, name, address) that genuinely isn't in the document
-                   - No reasonable interpretation, standard practice, or industry norm applies
-                   - You cannot make a defensible inference from the available information
-            
+
+                2. **Search for answers at multiple levels:**
+
+                   **Level 1 - Explicit Information:**
+                   - Direct statements and clearly defined terms
+                   - Specific clauses that address the question
+
+                   **Level 2 - Implicit Information:**
+                   - Logical implications from stated terms (e.g., if X must happen before Y, then Y cannot happen until X is complete)
+                   - Negative space reasoning (e.g., if only Party A can terminate, implicitly Party B cannot)
+                   - Definitional implications (e.g., "exclusive rights" implies others are excluded)
+                   - Conditional relationships (e.g., if payment triggers obligation, non-payment implies no obligation)
+                   - Cross-referencing between clauses that together answer the question
+
+                   **Level 3 - Structural Information:**
+                   - Document hierarchy and section relationships
+                   - Amendment and override structures
+                   - Definitions that cascade through the document
+                   - Precedence established by "notwithstanding" or "subject to" clauses
+
+                   **Level 4 - Contextual Information:**
+                   - Standard legal interpretation principles (specificity, hierarchy, context)
+                   - Industry-standard practices and norms
+                   - Typical contractual frameworks
+                   - Legal doctrines (e.g., contra proferentem, good faith)
+
+                3. **Interpretation Methodology:**
+
+                   **When information is implicit:**
+                   - Identify the relevant clauses that, when read together, answer the question
+                   - Explain the logical chain: "Clause A states X, which combined with Clause B stating Y, means Z"
+                   - Note: "⚠️ This interpretation is based on [specific clauses/logical implication/document structure]"
+
+                   **Examples of implicit reasoning:**
+                   - Q: "Can Party B assign this contract?" 
+                     A: "Section 5.3 states 'Party A may assign with written consent.' Since only Party A's assignment rights are mentioned and contracts typically require mutual consent for assignment, Party B likely cannot assign without explicit permission. ⚠️ Based on standard interpretation that enumeration of one party's rights suggests limitation of the other's."
+
+                   - Q: "What happens if payment is 60 days late?"
+                     A: "Section 4.2 states late fees apply after 30 days, and Section 4.5 allows termination for 'material breach.' While not explicitly stated, 60-day late payment would likely constitute material breach given the 30-day threshold for lesser penalties. ⚠️ Based on the escalation structure implied by these provisions."
+
+                4. **Structure your response:**
+
+                   **For explicit answers:**
+                   - State the answer clearly
+                   - Cite specific clause(s)
+                   - Provide direct quotations when helpful
+
+                   **For implicit answers:**
+                   - State the interpreted answer clearly
+                   - Explain the reasoning path step-by-step
+                   - Reference the clauses/structure that support the interpretation
+                   - Add interpretive disclaimer: "⚠️ This is based on [reasoning type] as it's not explicitly stated"
+
+                   **For questions requiring both:**
+                   - Start with explicit information
+                   - Layer on implicit interpretations
+                   - Clearly distinguish between what's stated vs. implied
+
+                5. **ONLY say "Information not found" if:**
+                   - The question asks for a specific fact (date, amount, name, address) that is neither stated nor derivable
+                   - No explicit text, implicit meaning, structural relationship, or reasonable interpretation can answer it
+                   - The question requires information genuinely outside the document's scope
+                   - You cannot make any defensible inference even using standard legal principles
+
                 **Response Format:**
-            
-                For YES/NO: Assessment (Likely Yes/No/Unclear) + detailed reasoning
-                For FACTUAL: Direct answer + explanation and sources
-                For HIERARCHY/PRECEDENCE/RELATIONSHIPS: Structured explanation of how elements relate
-                For CALCULATION: Result + methodology and references
-                For PROCESS/PROCEDURE: Step-by-step explanation with relevant clauses
-            
-                **Remember:** Users need actionable guidance. Use the document content, its structure, standard legal interpretation principles, and domain knowledge to provide helpful answers. Be an intelligent analyst, not just a text search tool.
+
+                **Explicit Information Available:**
+                "[Direct answer] — Per Section X.Y: '[relevant quote]'"
+
+                **Implicit Information (requires interpretation):**
+                "[Interpreted answer] — Based on:
+                • Section X.Y states: [clause 1]
+                • Section A.B states: [clause 2]
+                • Together, these imply: [reasoning]
+                ⚠️ This interpretation is based on [logical implication/document structure/standard practice]"
+
+                **Mixed (explicit + implicit):**
+                "[Answer] — Section X explicitly states [explicit part]. While [implicit aspect] isn't directly stated, it can be reasonably inferred from [reasoning]. ⚠️ The latter part is interpretive."
+
+                **Types of interpretive reasoning to apply:**
+                - **Inclusio unius est exclusio alterius**: Mentioning one thing excludes others
+                - **Noscitur a sociis**: Words are known by their companions (context)
+                - **Ejusdem generis**: General terms limited by specific preceding terms
+                - **Expressio unius est exclusio alterius**: Expressing one excludes others
+                - **Logical necessity**: If A requires B, then not-B means not-A
+                - **Structural precedence**: Later/specific provisions override earlier/general ones
+                - **Cross-referential synthesis**: Combining multiple clauses to derive meaning
+
+                **Remember:** 
+                - Users need actionable guidance on what documents MEAN, not just what they SAY
+                - Many questions are answerable through interpretation even when not explicitly addressed
+                - Be transparent about when you're interpreting vs. citing
+                - Use your analytical capabilities fully—you're a legal analyst, not just a search engine
+                - Good legal analysis often requires reading between the lines while being clear about doing so
                 """
+
+            messages = []
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": user_prompt})
 
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=messages,
                 temperature=0.7,
             )
 

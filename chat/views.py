@@ -228,13 +228,13 @@ class ChatView(generics.CreateAPIView):
 
                 if full_context_docs:
                     full_context = "\n\n" + "="*80 + "\n\n".join(full_context_docs)
-                    print(f"[HYBRID RAG] Loaded full context from database (cache was empty)")
+                    print("[HYBRID RAG] Loaded full context from database (cache was empty)")
 
             if use_enhanced_rag and full_context:
                 # FULL CONTEXT MODE: Small document(s), send entire text as context
                 print(f"\n{'='*60}")
                 print(f"[FULL CONTEXT MODE] Session: {session.id}")
-                print(f"  - Using complete document text as context")
+                print("  - Using complete document text as context")
                 print(f"  - Context length: {len(full_context):,} chars")
                 print(f"  - Query: {message}")
                 print(f"{'='*60}\n")
@@ -388,6 +388,15 @@ class ChatView(generics.CreateAPIView):
             except Exception:
                 pass
 
+            history_qs = session.messages.order_by("-created_at")[:20]
+            history = []
+            for msg in reversed(history_qs):  # Oldest first
+                role = "user" if msg.message_type == "user" else "assistant"
+                history.append({"role": role, "content": msg.content})
+
+            # Add the current user message
+            history.append({"role": "user", "content": message})
+
             # Generate response using context (skip if already done in full context mode)
             if not full_context:
                 if context_texts:
@@ -404,7 +413,7 @@ class ChatView(generics.CreateAPIView):
                         except Exception:
                             pass
                     llm_response, openai_response = openai_service.generate_answer_by_llm(
-                        similarity_text=context_text, user_query=message
+                        similarity_text=context_text, user_query=message, history=history
                     )
                 else:
                     # Log when no relevant context found
@@ -418,6 +427,7 @@ class ChatView(generics.CreateAPIView):
                     llm_response, openai_response = openai_service.generate_answer_by_llm(
                         similarity_text="No relevant document context found.",
                         user_query=message,
+                        history=history
                     )
             # else: llm_response already set in full context mode
 
